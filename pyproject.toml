@@ -1,0 +1,118 @@
+[project]
+name = "rmscep"
+version = "1.0.0+260912"
+description = "SCEP responder for RASENMAEHER, turns an MDM's certificate enrolment into a Deploy App user"
+license = "MIT"
+readme = "README.rst"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "libpvarki>=2.4,<3.0",
+    "libadvian>=1.4,<2.0",
+    "click>=8.1,<9.0",
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.34,<1.0",
+    "gunicorn>=23.0,<24.0",
+    "httpx>=0.28,<1.0",
+    # 44 is where pkcs7_decrypt_der arrived
+    "cryptography>=44",
+    "asn1crypto>=1.5,<2.0",
+]
+
+[project.urls]
+homepage = "https://github.com/pvarki/python-rasenmaeher-scep"
+repository = "https://github.com/pvarki/python-rasenmaeher-scep"
+
+[project.scripts]
+rmscep = "rmscep.console:rmscep_cli"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9.0",
+    "coverage>=7.4,<8.0",
+    "pytest-cov>=4.1,<5.0",
+    "black>=25.1,<26.0",
+    "bandit>=1.8,<2.0",
+    "mypy>=1.15,<2.0",
+    "prek>=0.2,<1.0",
+    "pytest-asyncio>=0.21,<1.0",
+    "bump-my-version>=1.2,<2.0",
+    "detect-secrets>=1.5,<2.0",
+    "httpx>=0.28.1,<1.0",
+    "tox>=4.0,<5.0",
+    "tox-uv>=1.0,<2.0",
+    "ruff>=0.15.12",
+    "pre-commit>=4.6,<5.0",
+]
+
+[[tool.uv.index]]
+name = "nexuslocal"
+url = "https://nexus.dev.pvarki.fi/repository/pypilocal/simple"
+explicit = true
+
+[tool.uv.sources]
+libpvarki = { index = "nexuslocal" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rmscep"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Security",
+]
+
+[tool.black]
+line-length = 120
+target-version = ['py311']
+exclude = '''
+(
+  /(
+      \.eggs         # exclude a few common directories in the
+    | \.git          # root of the project
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | _build
+    | buck-out
+    | build
+    | dist
+  )/
+  |  __pycache__
+)
+'''
+
+[tool.mypy]
+strict=true
+
+[[tool.mypy.overrides]]
+module="tests.*"
+disallow_untyped_decorators=false
+
+# asn1crypto ships no py.typed marker and no stubs exist. We need it for the parts of CMS that
+# cryptography cannot express (SCEP's custom signed attributes), so this is the price.
+[[tool.mypy.overrides]]
+module="asn1crypto.*"
+ignore_missing_imports=true
+
+[tool.pytest.ini_options]
+junit_family="xunit2"
+addopts="--cov=rmscep --cov-fail-under=65 --cov-branch"
+asyncio_mode="strict"
+
+[tool.coverage.run]
+omit = ["tests/*"]
+branch = true
