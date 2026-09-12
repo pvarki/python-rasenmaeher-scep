@@ -58,8 +58,9 @@ def _self_signed(key: Any, common_name: str) -> x509.Certificate:
 def _sign(key: Any, data: bytes) -> bytes:
     """Sign the way the key type requires"""
     if isinstance(key, ec.EllipticCurvePrivateKey):
-        return key.sign(data, ec.ECDSA(hashes.SHA256()))
-    return key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+        return bytes(key.sign(data, ec.ECDSA(hashes.SHA256())))
+    signature: bytes = key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+    return signature
 
 
 def _indefinite_length(der: bytes) -> bytes:
