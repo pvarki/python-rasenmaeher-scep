@@ -110,6 +110,80 @@ def client_csr(ctx: click.Context, common_name: str, keyfile: str | None, csrfil
     ctx.exit(0)
 
 
+@cli_group.command(name="obtain-cert")
+@click.pass_context
+@click.option("--signer-url", required=True, help="Base URL of the deployment's CSR signer")
+@click.option("--common-name", default="rmscep", help="CN to request, must match rasenmaeher's RM_MDM_AGENT_CNS")
+@click.option("--keyfile", default=None, help="Where to write the private key (default: RMSCEP_KEY)")
+@click.option("--certfile", default=None, help="Where to write the certificate (default: RMSCEP_CERT)")
+@click.option("--force", is_flag=True, help="Replace an identity that already exists")
+def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: click.Context,
+    signer_url: str,
+    common_name: str,
+    keyfile: str | None,
+    certfile: str | None,
+    force: bool,
+) -> None:
+    """Get our client identity signed by the deployment CA, then exit
+
+    Meant for a one shot init container that can reach the signer, so the long running service
+    never needs to: something that can ask for a certificate for an arbitrary subject is not a
+    privilege an internet facing parser should hold for its whole life.
+
+    Idempotent -- if the identity is already there it does nothing, so restarting the stack does
+    not churn certificates.
+    """
+    target_key = Path(keyfile) if keyfile else config.KEY
+    target_cert = Path(certfile) if certfile else config.CERT
+    if not target_key or not target_cert:
+        click.echo("Give --keyfile and --certfile, or set RMSCEP_KEY and RMSCEP_CERT", err=True)
+        ctx.exit(1)
+        return
+    if target_key.is_file() and target_cert.is_file() and not force:
+        click.echo(f"Identity already in {target_cert}, nothing to do")
+        ctx.exit(0)
+        return
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]))
+        .sign(key, hashes.SHA256())
+    )
+    csrpem = csr.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+    url = f"{signer_url.rstrip('/')}/api/v1/csr/sign"
+    try:
+        response = httpx.post(
+            url,
+            json={"certificate_request": csrpem, "profile": "client", "bundle": True},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        # The signer escapes the newlines, as CFSSL conventions do throughout this platform.
+        certpem = str(response.json()["result"]["certificate"]).replace("\\n", "\n")
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        click.echo(f"Could not get a certificate from {url}: {exc}", err=True)
+        ctx.exit(1)
+        return
+
+    target_key.parent.mkdir(parents=True, exist_ok=True)
+    target_cert.parent.mkdir(parents=True, exist_ok=True)
+    target_key.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    target_key.chmod(0o600)
+    target_cert.write_text(certpem, encoding="utf-8")
+    issued = x509.load_pem_x509_certificate(certpem.encode("utf-8"))
+    click.echo(f"Got {issued.subject.rfc4514_string()} valid until {issued.not_valid_after_utc.date()}")
+    ctx.exit(0)
+
+
 def rmscep_cli() -> None:
     """CLI entrypoint"""
     cli_group()  # pylint: disable=no-value-for-parameter
