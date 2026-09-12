@@ -3,10 +3,26 @@ on:
   workflow_dispatch: # Allow manual triggering
 
 jobs:
-  # prek pre-commit checks + .bumpversion.toml validation, from the CI library
+  # Only the bumpversion half. The library's prek job is checkout + prek-action with no venv, and
+  # the generated python config ends in a local mypy hook that resolves from PATH, so it cannot
+  # run there. Every sibling runs prek itself, after setup-python.
   general-checks:
     name: General checks
     uses: pvarki/config-ci-library/.github/workflows/general-check.yml@main
+    with:
+      run-prek: false
+
+  pre-commit:
+    name: Run pre-commit checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pvarki/config-ci-library/.github/actions/setup-python@main
+        with:
+          python-version: "3.11"
+      - name: Do pre-commit checks
+        run: |
+          uv run prek run --all-files
 
   test:
     name: Run tests
@@ -59,7 +75,7 @@ jobs:
 
   publish:
     name: Publish Docker image
-    needs: ["general-checks", "test", "docker-build-and-verify"]
+    needs: ["general-checks", "pre-commit", "test", "snyk-test", "docker-build-and-verify"]
     runs-on: ubuntu-latest # arc-runner-set
     permissions:
       contents: read
