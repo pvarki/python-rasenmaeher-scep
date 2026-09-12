@@ -30,7 +30,6 @@ dev = [
     "pytest>=8.0,<9.0",
     "coverage>=7.4,<8.0",
     "pytest-cov>=4.1,<5.0",
-    "black>=25.1,<26.0",
     "bandit>=1.8,<2.0",
     "mypy>=1.15,<2.0",
     "prek>=0.2,<1.0",
@@ -41,7 +40,6 @@ dev = [
     "tox>=4.0,<5.0",
     "tox-uv>=1.0,<2.0",
     "ruff>=0.15.12",
-    "pre-commit>=4.6,<5.0",
 ]
 
 [[tool.uv.index]]
@@ -73,27 +71,6 @@ extend-immutable-calls = [
     "fastapi.Cookie",
     "fastapi.Security",
 ]
-
-[tool.black]
-line-length = 120
-target-version = ['py311']
-exclude = '''
-(
-  /(
-      \.eggs         # exclude a few common directories in the
-    | \.git          # root of the project
-    | \.hg
-    | \.mypy_cache
-    | \.tox
-    | \.venv
-    | _build
-    | buck-out
-    | build
-    | dist
-  )/
-  |  __pycache__
-)
-'''
 
 [tool.mypy]
 strict=true
