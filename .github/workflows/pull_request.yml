@@ -82,7 +82,14 @@ jobs:
 
   publish:
     name: Publish Docker image
-    needs: ["general-checks", "pre-commit", "test", "snyk-test", "docker-build-and-verify"]
+    needs:
+      [
+        "general-checks",
+        "pre-commit",
+        "test",
+        "snyk-test",
+        "docker-build-and-verify",
+      ]
     runs-on: ubuntu-latest # arc-runner-set
     permissions:
       contents: read
