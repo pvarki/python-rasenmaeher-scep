@@ -21,19 +21,24 @@ async def request_healthcheck(request: Request) -> ProductHealthCheckResponse:
     RASENMAEHER restart this container, and in compose the autoheal watcher would happily do that
     on every flap.
     """
-    problems = []
+    broken = []
+    notes = []
     try:
         identity = get_ra(request)
-        extra = f"RA serial {identity.cert.serial_number}"
+        notes.append(f"RA serial {identity.cert.serial_number}")
     except RuntimeError:
-        problems.append("RA identity is not loaded")
-        extra = "no RA identity"
+        broken.append("RA identity is not loaded")
     if not config.CA_CHAIN_PATH.is_file():
-        problems.append(f"CA chain {config.CA_CHAIN_PATH} is missing")
+        broken.append(f"CA chain {config.CA_CHAIN_PATH} is missing")
+
+    # Not being configured to enrol anything is a deployment that has not turned this on yet, not
+    # a service that is failing. Saying otherwise would have the compose autoheal watcher restart
+    # a perfectly functioning container for ever. It is reported, and logged loudly at startup.
     if not config.CHALLENGE:
-        problems.append("no challenge configured")
+        notes.append("no challenge set, enrolment refused")
     if not config.RMAPI_URL:
-        problems.append("no RASENMAEHER URL configured")
-    if problems:
-        return ProductHealthCheckResponse(healthy=False, extra=", ".join(problems))
-    return ProductHealthCheckResponse(healthy=True, extra=extra)
+        notes.append("no RASENMAEHER URL set, enrolment refused")
+
+    if broken:
+        return ProductHealthCheckResponse(healthy=False, extra=", ".join(broken))
+    return ProductHealthCheckResponse(healthy=True, extra=", ".join(notes))
