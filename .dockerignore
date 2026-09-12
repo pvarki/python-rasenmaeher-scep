@@ -49,5 +49,7 @@ Dockerfile
 
 # mypy
 **/.mypy_cache/
+**/.ruff_cache/
+.prettier_cache
 **/.dmypy.json
 **/dmypy.json
