@@ -1,0 +1,182 @@
+"""The SCEP endpoints, end to end through the app
+
+RASENMAEHER is stubbed: what is under test here is the protocol surface and the decisions the
+responder makes before and after it asks.
+"""
+
+import datetime
+from collections.abc import Generator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from asn1crypto import cms
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+from fastapi.testclient import TestClient
+
+from rmscep import config
+from rmscep.rmapi import IssuedCertificate, RmapiRefused, RmapiUnavailable
+from rmscep.scep import CAPS
+from rmscep.web import scep_views
+from rmscep.web.application import get_app_no_init
+
+from .test_scep import CHALLENGE, build_pkcs_req
+
+ISSUED_CALLSIGN = "OTTER9"
+
+
+def _a_certificate(common_name: str) -> str:
+    """Something shaped like what the CA would hand back"""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+
+class _StubRmapi:
+    """Stands in for RASENMAEHER"""
+
+    raises: Exception | None = None
+
+    def __init__(self) -> None:
+        pass
+
+    async def complete_enrollment(self, callsign: str, csrpem: str, **kwargs: Any) -> IssuedCertificate:
+        _ = csrpem, kwargs
+        if _StubRmapi.raises is not None:
+            raise _StubRmapi.raises
+        return IssuedCertificate(callsign=callsign, certificate=_a_certificate(callsign))
+
+
+@pytest.fixture
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]:
+    """An app with its own RA identity, a CA chain on disk and RASENMAEHER stubbed out"""
+    ca_chain = tmp_path / "ca_chain.pem"
+    ca_chain.write_text(_a_certificate("Test CA"), encoding="utf-8")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "CA_CHAIN_PATH", ca_chain)
+    monkeypatch.setattr(config, "CHALLENGE", CHALLENGE)
+    monkeypatch.setattr(config, "RMAPI_URL", "https://rasenmaeher.test")
+    monkeypatch.setattr(scep_views, "Client", _StubRmapi)
+    _StubRmapi.raises = None
+    with TestClient(get_app_no_init()) as instance:
+        yield instance
+
+
+def _pki_status(body: bytes) -> tuple[str, str | None]:
+    """Read the status and failInfo out of a CertRep"""
+    info = cms.ContentInfo.load(body)
+    attrs = {attr["type"].native: attr["values"] for attr in info["content"]["signer_infos"][0]["signed_attrs"]}
+    fail = attrs.get("scep_fail_info")
+    return str(attrs["scep_pki_status"][0].native), (str(fail[0].native) if fail else None)
+
+
+def test_getcacaps(client: TestClient) -> None:
+    """What we tell a client we can do"""
+    response = client.get("/scep", params={"operation": "GetCACaps"})
+    assert response.status_code == 200
+    assert response.text == CAPS
+    assert "SHA-256" in response.text
+    assert "SHA-1" not in response.text
+
+
+def test_getcacert(client: TestClient) -> None:
+    """The RA certificate devices encrypt to, plus the chain they must trust"""
+    response = client.get("/scep", params={"operation": "GetCACert"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-x509-ca-ra-cert")
+    certs = cms.ContentInfo.load(response.content)["content"]["certificates"]
+    assert len(certs) == 2
+
+
+def test_unknown_operation(client: TestClient) -> None:
+    """Not everything that reaches a public endpoint is SCEP"""
+    assert client.get("/scep", params={"operation": "Nonsense"}).status_code == 400
+    assert client.post("/scep", params={"operation": "Nonsense"}, content=b"x").status_code == 400
+
+
+def test_enrolment(client: TestClient, tmp_path: Path) -> None:
+    """The ordinary case: the device gets a certificate for the key it holds"""
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN)
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-pki-message")
+    status, fail = _pki_status(response.content)
+    assert (status, fail) == ("0", None)
+
+
+def test_wrong_challenge_is_refused(client: TestClient, tmp_path: Path) -> None:
+    """The challenge is a nuisance filter, but it is still checked"""
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN, challenge="not the one")
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
+    assert response.status_code == 200, "a refusal is still a signed CertRep, not an HTTP error"
+    assert _pki_status(response.content) == ("2", "1")
+
+
+def test_no_challenge_configured_refuses_everything(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unconfigured responder must not become an open endpoint"""
+    monkeypatch.setattr(config, "CHALLENGE", "")
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN)
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
+    assert _pki_status(response.content)[0] == "2"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_fail_info"),
+    [(RmapiRefused("not planned"), "1"), (RmapiUnavailable("down"), "2")],
+)
+def test_rasenmaeher_answers_are_mapped(
+    client: TestClient, tmp_path: Path, error: Exception, expected_fail_info: str
+) -> None:
+    """A refusal is final for the device, an outage is not our fault -- both are told plainly"""
+    _StubRmapi.raises = error
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN)
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
+    assert _pki_status(response.content) == ("2", expected_fail_info)
+
+
+def test_oversized_body_is_refused_without_parsing(client: TestClient) -> None:
+    """A private key operation per megabyte of nonsense is not a service we offer"""
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=b"x" * (70 * 1024))
+    assert response.status_code == 413
+
+
+def test_malformed_body(client: TestClient) -> None:
+    """Nothing parsed means no transaction to answer within, so an HTTP error is all we have"""
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=b"not asn.1")
+    assert response.status_code == 400
+
+
+def test_healthcheck_reports_configuration(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Healthy means this service works, not that somebody configured it to do anything"""
+    healthy = client.get("/api/v1/healthcheck").json()
+    assert healthy["healthy"] is True
+    assert "RA serial" in str(healthy["extra"])
+
+    monkeypatch.setattr(config, "CHALLENGE", "")
+    idle = client.get("/api/v1/healthcheck").json()
+    assert idle["healthy"] is True, "unconfigured is idle, not broken -- autoheal would loop otherwise"
+    assert "enrolment refused" in str(idle["extra"])
+
+    monkeypatch.setattr(config, "CA_CHAIN_PATH", Path("/nonexistent/ca_chain.pem"))
+    broken = client.get("/api/v1/healthcheck").json()
+    assert broken["healthy"] is False

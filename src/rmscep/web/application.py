@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from libpvarki.logging import add_trace_and_audit, init_logging
 
 from rmscep import __version__
@@ -15,14 +15,6 @@ from .health import hrouter
 from .scep_views import router as scep_router
 
 LOGGER = logging.getLogger(__name__)
-
-
-def get_ra(request: Request) -> RaIdentity:
-    """The RA identity, loaded once at startup"""
-    identity = getattr(request.app.state, "ra_identity", None)
-    if identity is None:  # pragma: no cover -- lifespan always sets it
-        raise RuntimeError("RA identity was not loaded")
-    return identity  # type: ignore[no-any-return]
 
 
 @asynccontextmanager

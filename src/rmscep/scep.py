@@ -40,7 +40,7 @@ OID_FAIL_INFO = "2.16.840.1.113733.1.9.4"
 OID_SENDER_NONCE = "2.16.840.1.113733.1.9.5"
 OID_RECIPIENT_NONCE = "2.16.840.1.113733.1.9.6"
 OID_TRANSACTION_ID = "2.16.840.1.113733.1.9.7"
-OID_CHALLENGE_PASSWORD = "1.2.840.113549.1.9.7"
+OID_CHALLENGE_PASSWORD = "1.2.840.113549.1.9.7"  # nosec B105 -- an object identifier, not a credential
 
 MSG_CERT_REP = "3"
 MSG_PKCS_REQ = "19"
@@ -280,15 +280,18 @@ def _verify_signer(signer: cms.SignerInfo, device_cert: x509.Certificate) -> Non
     they are simply whatever the sender wrote. It is not authentication -- the certificate is
     self-signed by the device and means nothing to us -- it is integrity of the exchange.
     """
-    digest_algorithm = signer["digest_algorithm"]["algorithm"].native
-    if digest_algorithm not in ("sha256", "sha384", "sha512", "sha1"):
-        raise ScepError(f"unsupported digest algorithm {digest_algorithm}")
-    hasher: hashes.HashAlgorithm = {
+    # SHA-1 is deliberately absent. We advertise SHA-256 in GetCACaps and RFC 8894 requires every
+    # client to support it, so anything still signing with SHA-1 is old enough that we would
+    # rather it failed loudly than be quietly accepted.
+    hashers: dict[str, hashes.HashAlgorithm] = {
         "sha256": hashes.SHA256(),
         "sha384": hashes.SHA384(),
         "sha512": hashes.SHA512(),
-        "sha1": hashes.SHA1(),
-    }[digest_algorithm]
+    }
+    digest_algorithm = signer["digest_algorithm"]["algorithm"].native
+    if digest_algorithm not in hashers:
+        raise ScepError(f"unsupported digest algorithm {digest_algorithm}")
+    hasher = hashers[digest_algorithm]
     # RFC 5652 section 5.4: the signature is computed over the attributes DER encoded as an
     # explicit SET OF, not over the implicitly tagged [0] they appear as inside SignerInfo. Getting
     # this wrong rejects every genuine request, which is a long afternoon.

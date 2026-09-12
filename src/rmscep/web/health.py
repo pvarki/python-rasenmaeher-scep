@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request
 from libpvarki.schemas.product import ProductHealthCheckResponse
 
 from .. import config
-from .application import get_ra
+from .deps import get_ra
 
 LOGGER = logging.getLogger(__name__)
 

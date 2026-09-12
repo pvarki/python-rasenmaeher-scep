@@ -34,7 +34,7 @@ CA. RASENMAEHER's `RM_MDM_AGENT_CNS` decides whether our CN may do that. We cann
 callsign, cannot approve anything a human started, cannot revoke and cannot sign. If you find
 yourself wanting a broader credential, the design is wrong, not the credential.
 
-**Never register this as a kraftwerk product.** A product CN in this platform may have *any*
+**Never register this as a kraftwerk product.** A product CN in this platform may have _any_
 certificate request signed regardless of its subject, skips role checks entirely, and is treated as
 permanently valid by the edge. That is impersonation of anyone, handed to a service that parses
 ASN.1 from the open internet.

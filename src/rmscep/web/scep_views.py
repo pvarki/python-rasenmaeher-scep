@@ -22,7 +22,7 @@ from ..scep import (
     failure_rep,
     parse_pkcs_req,
 )
-from .application import get_ra
+from .deps import get_ra
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
