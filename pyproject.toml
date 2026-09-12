@@ -2,6 +2,9 @@
 name = "rmscep"
 version = "1.0.0+260912"
 description = "SCEP responder for RASENMAEHER, turns an MDM's certificate enrolment into a Deploy App user"
+authors = [
+    { name = "Benjam", email = "benjam@opendefence.fi" },
+]
 license = "MIT"
 readme = "README.rst"
 requires-python = ">=3.11,<4.0"
@@ -61,17 +64,6 @@ packages = ["src/rmscep"]
 line-length = 120
 target-version = "py311"
 
-[tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = [
-    "fastapi.Depends",
-    "fastapi.Query",
-    "fastapi.Path",
-    "fastapi.Body",
-    "fastapi.Header",
-    "fastapi.Cookie",
-    "fastapi.Security",
-]
-
 [tool.mypy]
 strict=true
 
@@ -89,6 +81,7 @@ ignore_missing_imports=true
 junit_family="xunit2"
 addopts="--cov=rmscep --cov-fail-under=65 --cov-branch"
 asyncio_mode="strict"
+asyncio_default_fixture_loop_scope="session"
 
 [tool.coverage.run]
 omit = ["tests/*"]
