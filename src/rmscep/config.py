@@ -29,7 +29,14 @@ KEY: Path | None = cfg("KEY", cast=Path, default=None)
 CHALLENGE: str = cfg("CHALLENGE", cast=str, default="")
 
 #: The deployment's CA chain, handed to devices in GetCACert so they trust what they are issued.
+#: This is about what the DEVICE trusts. It is deliberately not used to verify RASENMAEHER's own
+#: TLS: the front proxy serves a public certificate, so trusting only this would refuse it.
 CA_CHAIN_PATH: Path = cfg("CA_CHAIN_PATH", cast=Path, default=Path("/ca_public/ca_chain.pem"))
+
+#: What verifies RASENMAEHER's server certificate. Empty means the system trust store, which is
+#: what the public mTLS host needs. Set it to a PEM only where RASENMAEHER is reached on a name
+#: whose certificate the system store does not know.
+RMAPI_CA: Path | None = cfg("RMAPI_CA", cast=Path, default=None)
 
 #: Persistent state. Only ever the RA identity.
 DATA_DIR: Path = cfg("DATA_DIR", cast=Path, default=Path("/data/persistent"))

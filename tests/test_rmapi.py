@@ -110,3 +110,43 @@ async def test_answer_that_is_not_json(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(lambda request: httpx.Response(200, text="<html>hello</html>"), monkeypatch)
     with pytest.raises(RmapiUnavailable):
         await client.complete_enrollment("OTTER1", "csr")
+
+
+def _captured_verify(monkeypatch: pytest.MonkeyPatch) -> object:
+    """What the client would hand httpx as its trust store"""
+    seen: dict[str, object] = {}
+
+    class _Recorder:
+        def __init__(self, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Recorder)
+    Client(base_url="https://rasenmaeher.test")._client()
+    return seen["verify"]
+
+
+def test_rmapi_tls_uses_the_system_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The deployment CA is what devices trust, not what RASENMAEHER is served with
+
+    In compose we reach it through the public mTLS host, whose certificate is publicly issued.
+    Pinning to the deployment CA chain here refused every connection, so nothing could enrol.
+    """
+    ca_chain = tmp_path / "ca_chain.pem"
+    ca_chain.write_text("-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setattr(config, "CA_CHAIN_PATH", ca_chain)
+    monkeypatch.setattr(config, "RMAPI_CA", None)
+    assert _captured_verify(monkeypatch) is True, "the CA chain must not become the trust store"
+
+
+def test_rmapi_ca_overrides_when_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """For a deployment that reaches RASENMAEHER on a name the system store does not know"""
+    own_ca = tmp_path / "rmapi_ca.pem"
+    own_ca.write_text("-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setattr(config, "RMAPI_CA", own_ca)
+    assert _captured_verify(monkeypatch) == str(own_ca)
+
+
+def test_rmapi_ca_that_does_not_exist_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A misconfigured path must not silently disable verification"""
+    monkeypatch.setattr(config, "RMAPI_CA", Path("/nonexistent/ca.pem"))
+    assert _captured_verify(monkeypatch) is True

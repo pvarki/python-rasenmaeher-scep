@@ -66,9 +66,13 @@ class Client:
         self.timeout = timeout if timeout is not None else config.RMAPI_TIMEOUT
 
     def _client(self) -> httpx.AsyncClient:
+        # The system trust store, because in compose we reach RASENMAEHER through the public mTLS
+        # host and that serves a publicly issued certificate. Verifying against the deployment CA
+        # here -- which is what devices trust, a different question entirely -- refuses every
+        # connection before a single enrolment can be completed.
         verify: str | bool = True
-        if config.CA_CHAIN_PATH.is_file():
-            verify = str(config.CA_CHAIN_PATH)
+        if config.RMAPI_CA and config.RMAPI_CA.is_file():
+            verify = str(config.RMAPI_CA)
         return httpx.AsyncClient(timeout=self.timeout, cert=self.cert, verify=verify)
 
     async def complete_enrollment(
