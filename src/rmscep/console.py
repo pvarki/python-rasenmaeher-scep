@@ -1,5 +1,6 @@
 """CLI entrypoints for rmscep"""
 
+import datetime
 import logging
 import sys
 from pathlib import Path
@@ -117,6 +118,12 @@ def client_csr(ctx: click.Context, common_name: str, keyfile: str | None, csrfil
 @click.option("--keyfile", default=None, help="Where to write the private key (default: RMSCEP_KEY)")
 @click.option("--certfile", default=None, help="Where to write the certificate (default: RMSCEP_CERT)")
 @click.option("--force", is_flag=True, help="Replace an identity that already exists")
+@click.option(
+    "--renew-before-days",
+    default=14,
+    show_default=True,
+    help="Replace the identity when it expires within this many days",
+)
 def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ctx: click.Context,
     signer_url: str,
@@ -124,6 +131,7 @@ def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-argum
     keyfile: str | None,
     certfile: str | None,
     force: bool,
+    renew_before_days: int,
 ) -> None:
     """Get our client identity signed by the deployment CA, then exit
 
@@ -131,8 +139,10 @@ def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-argum
     never needs to: something that can ask for a certificate for an arbitrary subject is not a
     privilege an internet facing parser should hold for its whole life.
 
-    Idempotent -- if the identity is already there it does nothing, so restarting the stack does
-    not churn certificates.
+    Idempotent -- an identity that is still good is left alone, so restarting the stack does not
+    churn certificates. One that is expired or close to it is replaced, because nothing renews it
+    while the container keeps running and the signed lifetime is far shorter than the uptime we
+    would like.
     """
     target_key = Path(keyfile) if keyfile else config.KEY
     target_cert = Path(certfile) if certfile else config.CERT
@@ -141,9 +151,15 @@ def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-argum
         ctx.exit(1)
         return
     if target_key.is_file() and target_cert.is_file() and not force:
-        click.echo(f"Identity already in {target_cert}, nothing to do")
-        ctx.exit(0)
-        return
+        remaining = _days_left(target_cert)
+        if remaining is None:
+            click.echo(f"Identity in {target_cert} does not parse, replacing it")
+        elif remaining > renew_before_days:
+            click.echo(f"Identity already in {target_cert}, valid {remaining}d, nothing to do")
+            ctx.exit(0)
+            return
+        else:
+            click.echo(f"Identity in {target_cert} expires in {remaining}d, renewing")
 
     key = ec.generate_private_key(ec.SECP256R1())
     csr = (
@@ -187,3 +203,16 @@ def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-argum
 def rmscep_cli() -> None:
     """CLI entrypoint"""
     cli_group()  # pylint: disable=no-value-for-parameter
+
+
+def _days_left(certfile: Path) -> int | None:
+    """Whole days until the certificate expires, or None if it cannot be read
+
+    Negative once it has expired, so the caller renews on the same branch.
+    """
+    try:
+        cert = x509.load_pem_x509_certificate(certfile.read_bytes())
+    except (ValueError, OSError) as exc:
+        LOGGER.warning("Could not read %s: %s", certfile, exc)
+        return None
+    return (cert.not_valid_after_utc - datetime.datetime.now(datetime.UTC)).days

@@ -4,6 +4,7 @@ Three of these run in a container entrypoint or an init container, so they have 
 happy path does not happen.
 """
 
+import datetime
 from pathlib import Path
 
 import httpx
@@ -23,8 +24,6 @@ def _signed(csrpem: str) -> str:
     csr = x509.load_pem_x509_csr(csrpem.encode("utf-8"))
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
-    import datetime
-
     now = datetime.datetime.now(datetime.UTC)
     cert = (
         x509.CertificateBuilder()
@@ -150,3 +149,61 @@ def test_healthcheck_cli_when_nothing_is_listening(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(httpx, "get", boom)
     assert CliRunner().invoke(cli_group, ["healthcheck"]).exit_code == 1
+
+
+def _signed_for(csrpem: str, days: int) -> str:
+    """Like _signed, but the caller says how long it lasts"""
+    csr = x509.load_pem_x509_csr(csrpem.encode("utf-8"))
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(csr.subject)
+        .issuer_name(issuer)
+        .public_key(csr.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=days))
+        .sign(ca_key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8").replace("\n", "\\n")
+
+
+@pytest.mark.parametrize(
+    ("days", "should_renew"),
+    [(200, False), (5, True), (-1, True)],
+)
+def test_obtain_cert_renews_when_the_identity_is_running_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, days: int, should_renew: bool
+) -> None:
+    """Nothing renews the identity while the container runs, so the init container has to
+
+    Its signed lifetime is far shorter than the uptime we want, and an expired client certificate
+    means every enrolment fails at the TLS handshake.
+    """
+    keyfile, certfile = tmp_path / "k.pem", tmp_path / "c.pem"
+    issued_lifetimes = iter([days, 400])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        csrpem = json.loads(request.read().decode("utf-8"))["certificate_request"]
+        return httpx.Response(200, json={"result": {"certificate": _signed_for(csrpem, next(issued_lifetimes))}})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Client(transport=transport).post(url, **kw))
+
+    args = ["obtain-cert", "--signer-url", "http://signer.test", "--keyfile", str(keyfile), "--certfile", str(certfile)]
+    first = CliRunner().invoke(cli_group, args)
+    assert first.exit_code == 0, first.output
+    before = certfile.read_bytes()
+
+    second = CliRunner().invoke(cli_group, args)
+    assert second.exit_code == 0, second.output
+    if should_renew:
+        assert certfile.read_bytes() != before, "a certificate about to expire must be replaced"
+        assert "renewing" in second.output or "does not parse" in second.output
+    else:
+        assert certfile.read_bytes() == before, "a healthy certificate must not be churned"
+        assert "nothing to do" in second.output
