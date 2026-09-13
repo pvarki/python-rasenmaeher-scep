@@ -355,17 +355,32 @@ def parse_pkcs_req(body: bytes, ra: RaIdentity) -> ScepRequest:
     except Exception as exc:
         raise ScepError(f"could not decrypt the request: {exc}") from exc
 
-    csr = x509.load_der_x509_csr(csr_der)
-    if not csr.is_signature_valid:
+    # Everything from here reads bytes an unauthenticated caller chose. They decrypted, which only
+    # means they had our public key, so they still have to be treated as hostile: an uncaught
+    # exception here is a 500 on an internet facing endpoint rather than a refusal.
+    try:
+        csr = x509.load_der_x509_csr(csr_der)
+        signature_ok = csr.is_signature_valid
+    except Exception as exc:
+        raise ScepError(f"the request did not contain a certificate request: {exc}") from exc
+    if not signature_ok:
         raise ScepError("the certificate request signature does not verify", FAIL_BAD_IDENTITY)
-    common_names = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    try:
+        common_names = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    except Exception as exc:
+        raise ScepError(f"could not read the request subject: {exc}") from exc
     if len(common_names) != 1 or not str(common_names[0].value).strip():
         # An MDM whose subject template has not been filled in yet sends an empty CN. Refusing here
         # means we never ask RASENMAEHER about a callsign nobody could have planned.
         raise ScepError("the certificate request has no single usable common name", FAIL_BAD_IDENTITY)
 
     challenge: str | None = None
-    for attribute in csr.attributes:
+    try:
+        attributes = list(csr.attributes)
+    except Exception as exc:
+        # cryptography raises on duplicate or malformed attributes, and a client controls these
+        raise ScepError(f"could not read the request attributes: {exc}") from exc
+    for attribute in attributes:
         if attribute.oid.dotted_string == OID_CHALLENGE_PASSWORD:
             challenge = attribute.value.decode("utf-8", errors="replace")
 
