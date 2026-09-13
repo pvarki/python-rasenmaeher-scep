@@ -109,7 +109,18 @@ async def scep_post(request: Request, operation: str = "") -> Response:
         # retrying; the operator plans another callsign.
         return refuse(f"rasenmaeher refused ({exc})", FAIL_BAD_IDENTITY)
     except RmapiUnavailable as exc:
-        return refuse(f"rasenmaeher unavailable ({exc})", FAIL_BAD_REQUEST)
+        # Somebody else's bad day, not a verdict on this device, so it must NOT get a signed
+        # failure: a CertRep carrying failInfo is final to a SCEP client and would spend the
+        # enrolment on a hiccup. An HTTP error is the one answer the MDM will come back from.
+        # Reachable in ordinary operation: the front proxy OCSP-checks our client certificate and
+        # a freshly issued one is unknown to the responder until its next refresh.
+        LOGGER.warning(
+            "Answering 503 for %s, rasenmaeher unavailable (%s) [transaction=%s]",
+            _safe(callsign),
+            exc,
+            transaction,
+        )
+        return Response(content=b"rasenmaeher unavailable", status_code=503, media_type="text/plain")
 
     LOGGER.info("Issued a certificate to %s [transaction=%s]", _safe(callsign), transaction)
     return Response(content=cert_rep(ra, parsed, issued.certificate), media_type=PKI_MESSAGE)

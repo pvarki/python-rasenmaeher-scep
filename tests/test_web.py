@@ -139,19 +139,29 @@ def test_no_challenge_configured_refuses_everything(
     assert _pki_status(response.content)[0] == "2"
 
 
-@pytest.mark.parametrize(
-    ("error", "expected_fail_info"),
-    [(RmapiRefused("not planned"), "1"), (RmapiUnavailable("down"), "2")],
-)
-def test_rasenmaeher_answers_are_mapped(
-    client: TestClient, tmp_path: Path, error: Exception, expected_fail_info: str
-) -> None:
-    """A refusal is final for the device, an outage is not our fault -- both are told plainly"""
-    _StubRmapi.raises = error
+def test_a_refusal_is_final_and_signed(client: TestClient, tmp_path: Path) -> None:
+    """Not planned, already taken, not ours: the device gains nothing by asking again"""
+    _StubRmapi.raises = RmapiRefused("not planned")
     ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
     body = build_pkcs_req(ra, ISSUED_CALLSIGN)
     response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
-    assert _pki_status(response.content) == ("2", expected_fail_info)
+    assert response.status_code == 200, "a refusal is a signed CertRep, not an HTTP error"
+    assert _pki_status(response.content) == ("2", "1")
+
+
+def test_an_outage_is_retryable_not_a_verdict(client: TestClient, tmp_path: Path) -> None:
+    """A CertRep carrying failInfo is FINAL to a SCEP client
+
+    Answering one when RASENMAEHER merely hiccuped spends the enrolment for good. The front proxy
+    OCSP-checks our client certificate and a freshly issued one is unknown to the responder until
+    its next refresh, so this is an ordinary startup condition, not a rare one.
+    """
+    _StubRmapi.raises = RmapiUnavailable("down")
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN)
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
+    assert response.status_code == 503, "the MDM has to be able to come back"
+    assert b"BEGIN" not in response.content and response.headers["content-type"].startswith("text/plain")
 
 
 def test_oversized_body_is_refused_without_parsing(client: TestClient) -> None:
