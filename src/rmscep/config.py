@@ -52,3 +52,29 @@ SCEP_PATH: str = cfg("SCEP_PATH", cast=str, default="/scep")
 def ra_dir() -> Path:
     """Directory holding the RA identity"""
     return DATA_DIR / "ra"
+
+
+# --- the MDM side -------------------------------------------------------------------------
+# Used only by the `rmscep mdm` commands, which an operator runs when a deployment is set up or
+# changes. The responder itself never talks to an MDM and must not hold its token.
+
+#: Where the MDM's API answers
+MDM_URL: str = cfg("MDM_URL", cast=str, default="")
+
+#: A file holding the MDM API token. A path rather than the value, so it can be a mounted secret
+#: and never appears in the process environment of an internet facing service.
+MDM_TOKEN_FILE: Path | None = cfg("MDM_TOKEN_FILE", cast=Path, default=None)
+
+#: The group every device of this deployment joins. Fleet calls it a team.
+MDM_TEAM: str = cfg("MDM_TEAM", cast=str, default="rmscep")
+
+#: What this deployment wants installed, as a document. Deliberately not known in code: what a
+#: deployment installs is a property of that deployment. See rmscep.mdmtemplate.
+MDM_TEMPLATE: Path | None = cfg("MDM_TEMPLATE", cast=Path, default=None)
+
+#: The deployment's DNS name, which the template substitutes into URLs
+DOMAIN: str = cfg("DOMAIN", cast=str, default="")
+
+#: The MDM certificate template name, which becomes the Android keystore alias the certificate
+#: lands under. Installing a second key under an existing alias fails, so this is per deployment.
+KEY_ALIAS: str = cfg("KEY_ALIAS", cast=str, default="rmscep")
