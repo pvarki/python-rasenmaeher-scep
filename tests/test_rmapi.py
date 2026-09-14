@@ -150,3 +150,26 @@ def test_rmapi_ca_that_does_not_exist_is_ignored(monkeypatch: pytest.MonkeyPatch
     """A misconfigured path must not silently disable verification"""
     monkeypatch.setattr(config, "RMAPI_CA", Path("/nonexistent/ca.pem"))
     assert _captured_verify(monkeypatch) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 307])
+async def test_a_redirect_is_an_outage_not_a_verdict(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """The mTLS location answers a failed client-certificate check with a 302 to an error page
+
+    That is exactly what a freshly issued certificate gets while the OCSP responder has not heard
+    of it yet. Treating it as a refusal hands the device a final answer and spends its callsign
+    over a few minutes of warm-up, which is the failure the 503 handling exists to prevent.
+    """
+    client = _client(lambda request: httpx.Response(status, headers={"location": "/error?code=mtls_fail"}), monkeypatch)
+    with pytest.raises(RmapiUnavailable):
+        await client.complete_enrollment("OTTER1", "csr")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 409])
+async def test_rasenmaeher_own_refusals_stay_final(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """Not planned, not ours, already taken: these are verdicts and must not become retries"""
+    client = _client(lambda request: httpx.Response(status, json={"detail": "no"}), monkeypatch)
+    with pytest.raises(RmapiRefused):
+        await client.complete_enrollment("OTTER1", "csr")

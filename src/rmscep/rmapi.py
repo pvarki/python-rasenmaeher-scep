@@ -101,7 +101,12 @@ class Client:
             LOGGER.warning("Could not reach RASENMAEHER: %s", exc)
             raise RmapiUnavailable(str(exc)) from exc
 
-        if response.status_code >= 500:
+        if 300 <= response.status_code < 400 or response.status_code >= 500:
+            # A redirect is never RASENMAEHER's own verdict: it can only come from the proxy in
+            # front of it. The mTLS location answers a failed client-certificate check with a 302
+            # to an error page, which is exactly what a freshly issued certificate gets while the
+            # OCSP responder still has not heard of it. Treating that as a refusal would hand the
+            # device a final answer and spend its callsign over a few minutes of warm-up.
             LOGGER.warning("RASENMAEHER answered %s", response.status_code)
             raise RmapiUnavailable(f"HTTP {response.status_code}")
         if response.status_code != 200:
