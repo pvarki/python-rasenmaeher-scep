@@ -15,7 +15,8 @@ from libadvian.logging import init_logging
 
 from rmscep import __version__
 
-from . import config
+from . import config, mdmtemplate
+from .mdm import FleetError, FleetMdm
 from .scep import RaIdentity
 
 LOGGER = logging.getLogger(__name__)
@@ -216,3 +217,80 @@ def _days_left(certfile: Path) -> int | None:
         LOGGER.warning("Could not read %s: %s", certfile, exc)
         return None
     return (cert.not_valid_after_utc - datetime.datetime.now(datetime.UTC)).days
+
+
+@cli_group.command(name="mdm-apply")
+@click.pass_context
+@click.option("--template", default=None, help="The document saying what to install (default: RMSCEP_MDM_TEMPLATE)")
+@click.option("--mdm-url", default=None, help="Base URL of the MDM API (default: RMSCEP_MDM_URL)")
+@click.option("--team", default=None, help="The group devices join (default: RMSCEP_MDM_TEAM)")
+@click.option("--domain", default=None, help="The deployment's DNS name (default: RMSCEP_DOMAIN)")
+@click.option(
+    "--force-policy", is_flag=True, help="Re-upload the policy even if unchanged, to reach a host that just joined"
+)
+@click.option("--dry-run", is_flag=True, help="Read and validate the template, then stop")
+def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: click.Context,
+    template: str | None,
+    mdm_url: str | None,
+    team: str | None,
+    domain: str | None,
+    force_policy: bool,
+    dry_run: bool,
+) -> None:
+    """Tell the MDM what this deployment's devices need
+
+    An operator runs this when a deployment is set up or its template changes. It is deliberately
+    not part of the responder: something holding an MDM's API token has no business also being an
+    internet facing parser.
+
+    Order matters and is handled for you. Apps install at ENROLMENT and at no other time, so a
+    device that has already joined will not pick up a template applied afterwards -- it has to
+    enrol again, under a callsign that has not been spent.
+    """
+    path = Path(template) if template else config.MDM_TEMPLATE
+    the_domain = domain or config.DOMAIN
+    if not path:
+        click.echo("Give --template or set RMSCEP_MDM_TEMPLATE", err=True)
+        ctx.exit(1)
+        return
+    if not the_domain:
+        click.echo("Give --domain or set RMSCEP_DOMAIN", err=True)
+        ctx.exit(1)
+        return
+
+    try:
+        wanted = mdmtemplate.load(path, domain=the_domain, key_alias=config.KEY_ALIAS)
+    except mdmtemplate.TemplateError as exc:
+        click.echo(f"Template refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+
+    click.echo(f"Template names {len(wanted.apps)} apps, {len(wanted.preinstall_packages)} installed at enrolment")
+    for app in wanted.apps:
+        click.echo(f"  {app.package}{' (at enrolment)' if app.preinstall else ' (on demand)'}")
+    if wanted.link_app:
+        click.echo(f"  launcher link {wanted.link_app.title!r} -> {wanted.link_app.url}")
+    if dry_run:
+        ctx.exit(0)
+        return
+
+    url = mdm_url or config.MDM_URL
+    if not url:
+        click.echo("Give --mdm-url or set RMSCEP_MDM_URL", err=True)
+        ctx.exit(1)
+        return
+    if not config.MDM_TOKEN_FILE or not config.MDM_TOKEN_FILE.is_file():
+        click.echo("Set RMSCEP_MDM_TOKEN_FILE to a file holding the MDM API token", err=True)
+        ctx.exit(1)
+        return
+    token = config.MDM_TOKEN_FILE.read_text(encoding="utf-8").strip()
+
+    try:
+        result = FleetMdm(url, token).apply(team or config.MDM_TEAM, wanted, force_policy=force_policy)
+    except FleetError as exc:
+        click.echo(f"The MDM refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+    click.echo(f"Applied to team {result['team_id']}: {len(result['assigned'])} apps assigned")
+    ctx.exit(0)
