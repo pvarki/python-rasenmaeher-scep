@@ -2034,7 +2034,7 @@ wheels = [
 
 [[package]]
 name = "rmscep"
-version = "1.0.0+260912"
+version = "1.0.1+260914"
 source = { editable = "." }
 dependencies = [
     { name = "asn1crypto" },

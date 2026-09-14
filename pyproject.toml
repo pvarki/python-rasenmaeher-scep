@@ -1,6 +1,6 @@
 [project]
 name = "rmscep"
-version = "1.0.0+260912"
+version = "1.0.1+260914"
 description = "SCEP responder for RASENMAEHER, turns an MDM's certificate enrolment into a Deploy App user"
 authors = [
     { name = "Benjam", email = "benjam@opendefence.fi" },
