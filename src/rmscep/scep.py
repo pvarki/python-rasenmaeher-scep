@@ -327,16 +327,28 @@ def parse_pkcs_req(body: bytes, ra: RaIdentity) -> ScepRequest:
     except Exception as exc:
         raise ScepError(f"could not parse the request: {exc}") from exc
 
-    message_type = attrs.get("scep_message_type", [None])[0]
-    if message_type is None or message_type.native != MSG_PKCS_REQ:
-        raise ScepError("only PKCSReq is supported")
-    transaction_id = str(attrs["scep_transaction_id"][0].native)
-    sender_nonce = bytes(attrs["scep_sender_nonce"][0].native)
+    # These read attributes a caller chose, and they are reachable with no crypto at all: a handful
+    # of DER bytes with no transactionID is enough. A missing attribute raises KeyError and one
+    # carrying an empty SET OF raises IndexError, so both have to become refusals here rather than
+    # a traceback and a 500 on an internet facing endpoint.
+    try:
+        message_type = attrs.get("scep_message_type", [None])[0]
+        if message_type is None or message_type.native != MSG_PKCS_REQ:
+            raise ScepError("only PKCSReq is supported")
+        transaction_id = str(attrs["scep_transaction_id"][0].native)
+        sender_nonce = bytes(attrs["scep_sender_nonce"][0].native)
+    except ScepError:
+        raise
+    except Exception as exc:
+        raise ScepError(f"the request is missing a SCEP attribute: {exc}") from exc
 
     certs = [choice.chosen for choice in signed["certificates"]] if signed["certificates"] else []
     if not certs:
         raise ScepError("request carried no device certificate to reply to")
-    device_cert = x509.load_der_x509_certificate(certs[0].dump())
+    try:
+        device_cert = x509.load_der_x509_certificate(certs[0].dump())
+    except Exception as exc:
+        raise ScepError(f"the request's device certificate does not parse: {exc}") from exc
     _verify_signer(signer, device_cert)
 
     # The content is the pkcsPKIEnvelope: a complete ContentInfo(EnvelopedData). Re-encode it as
