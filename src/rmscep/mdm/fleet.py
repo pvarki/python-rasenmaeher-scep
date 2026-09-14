@@ -52,7 +52,9 @@ class FleetMdm:
         except httpx.HTTPError as exc:
             raise FleetError(f"could not reach the MDM: {exc}") from exc
         if response.status_code >= 400:
-            raise FleetError(f"{method} {path} answered {response.status_code}: {response.text[:200]}")
+            # Enough of the body to keep the reason intact: the retry below matches on it, and
+            # truncating to a couple of hundred characters cut the phrase off mid-word.
+            raise FleetError(f"{method} {path} answered {response.status_code}: {response.text[:800]}")
         if not response.content:
             return {}
         try:
@@ -62,14 +64,20 @@ class FleetMdm:
         return payload
 
     def _upload(
-        self, path: str, fields: dict[str, str], filename: str, payload: bytes, file_field: str
+        self,
+        path: str,
+        fields: dict[str, str],
+        filename: str,
+        payload: bytes,
+        file_field: str,
+        content_type: str = "application/json",
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         try:
             response = httpx.post(
                 url,
                 data=fields,
-                files={file_field: (filename, payload, "application/octet-stream")},
+                files={file_field: (filename, payload, content_type)},
                 headers={"Authorization": f"Bearer {self._token}"},
                 timeout=self.timeout,
             )
@@ -121,7 +129,8 @@ class FleetMdm:
                     ids[package] = int(created["software_title_id"])
                     break
                 except FleetError as exc:
-                    if "isn't available in Play Store" not in str(exc) or attempt == WEB_APP_PUBLISH_ATTEMPTS - 1:
+                    # Apostrophes vary; match the part that does not.
+                    if "available in Play Store" not in str(exc) or attempt == WEB_APP_PUBLISH_ATTEMPTS - 1:
                         raise
                     LOGGER.info("Waiting for managed Play to publish %s", package)
                     time.sleep(WEB_APP_PUBLISH_WAIT)
@@ -193,10 +202,11 @@ class FleetMdm:
                     return str(package)
         created = self._upload(
             "/api/latest/fleet/software/web_apps",
-            {"team_id": str(team), "name": title, "start_url": url, "display_mode": "FULL_SCREEN"},
+            {"title": title, "url": url},
             "icon.png",
             launcher_icon(),
             file_field="icon",
+            content_type="image/png",
         )
         package = str(created.get("app_store_id") or created.get("package_name") or "")
         if not package:
