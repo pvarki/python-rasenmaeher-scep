@@ -75,3 +75,27 @@ def test_not_json_is_refused(tmp_path: Path) -> None:
     path.write_text("this is not json", encoding="utf-8")
     with pytest.raises(TemplateError):
         load(path, domain="example.fi", key_alias="rmscep")
+
+
+def test_annotations_never_reach_the_device(tmp_path: Path) -> None:
+    """The document explains itself, and none of that explanation is a setting
+
+    An annotation left in an app's configuration would be pushed to the phone as a real managed
+    configuration key.
+    """
+    body = {
+        "_comment": "why this file exists",
+        "apps": [
+            {
+                "_comment": "why this app",
+                "package": "com.example.one",
+                "config": {"_comment": "why this key", "real": "value", "nested": {"_x": 1, "keep": 2}},
+            }
+        ],
+        "policy": {"_comment": "why this policy", "defaultPermissionPolicy": "GRANT"},
+        "link_app": {"_comment": "why a link", "title": "Deploy App", "url": "{mtls_url}/"},
+    }
+    template = load(_write(tmp_path, body), domain="example.fi", key_alias="rmscep")
+    assert template.apps[0].config == {"real": "value", "nested": {"keep": 2}}
+    assert template.policy == {"defaultPermissionPolicy": "GRANT"}
+    assert template.link_app is not None and template.link_app.title == "Deploy App"

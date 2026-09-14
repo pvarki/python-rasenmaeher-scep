@@ -61,6 +61,20 @@ class MdmTemplate:
         return tuple(app.package for app in self.apps if app.preinstall)
 
 
+def _strip_comments(value: Any) -> Any:
+    """Drop keys beginning with an underscore, at any depth
+
+    The document carries the reasoning for what it asks for, because the reasoning is the part
+    that was expensive to learn. None of it is for the MDM: an annotation left in an app's
+    configuration would be pushed to the device as a real setting.
+    """
+    if isinstance(value, dict):
+        return {key: _strip_comments(item) for key, item in value.items() if not str(key).startswith("_")}
+    if isinstance(value, list):
+        return [_strip_comments(item) for item in value]
+    return value
+
+
 def _substitute(value: Any, values: dict[str, str]) -> Any:
     """Fill the placeholders wherever they appear, at any depth"""
     if isinstance(value, str):
@@ -91,7 +105,7 @@ def load(path: Path, domain: str, key_alias: str) -> MdmTemplate:
         raise TemplateError(f"{path} must contain an object")
 
     values = {"domain": domain, "mtls_url": f"https://mtls.{domain}", "key_alias": key_alias}
-    raw = _substitute(raw, values)
+    raw = _strip_comments(_substitute(raw, values))
 
     apps: list[App] = []
     for entry in raw.get("apps", []):
