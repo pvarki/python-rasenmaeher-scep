@@ -9,6 +9,13 @@ certificate profile at this service. The device enrols over SCEP and comes out o
 enrolment with a certificate from the RASENMAEHER deployment CA, so a device can join a
 deployment without installing any application of ours on the phone.
 
+How it works
+------------
+
+``docs/mdm-enrolment.rst`` describes the whole path: what authorises an enrolment, what the MDM
+must put in the certificate subject, the order operations have to happen in, and what is not done
+yet.
+
 Talking to rmapi
 ----------------
 
