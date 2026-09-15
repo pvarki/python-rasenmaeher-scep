@@ -41,6 +41,23 @@ class App:
 
 
 @dataclass(frozen=True)
+class Certificate:
+    """The certificate the MDM asks us for on a device's behalf
+
+    ``subject`` is security configuration, not cosmetics: it is what carries the per-enrolment
+    code that proves the MDM assigned this device this callsign. It lives here so it is reviewed
+    and deployed like everything else, rather than typed into a console once and forgotten.
+
+    ``name`` becomes the Android keystore alias, and installing a second key under an existing
+    alias fails, so it is per deployment rather than per device.
+    """
+
+    name: str
+    subject: str
+    authority: str
+
+
+@dataclass(frozen=True)
 class LinkApp:
     """A managed web app, so the deployment has an icon on the launcher"""
 
@@ -55,6 +72,7 @@ class MdmTemplate:
     apps: tuple[App, ...]
     policy: dict[str, Any]
     link_app: LinkApp | None = None
+    certificate: Certificate | None = None
 
     @property
     def preinstall_packages(self) -> tuple[str, ...]:
@@ -132,4 +150,14 @@ def load(path: Path, domain: str, key_alias: str) -> MdmTemplate:
     LOGGER.info(
         "Template names %s apps, %s of them installed at enrolment", len(apps), len([a for a in apps if a.preinstall])
     )
-    return MdmTemplate(apps=tuple(apps), policy=policy, link_app=link)
+    certificate = None
+    if raw.get("certificate"):
+        entry = raw["certificate"]
+        missing = [key for key in ("name", "subject", "authority") if not entry.get(key)]
+        if not isinstance(entry, dict) or missing:
+            raise TemplateError(f"certificate needs name, subject and authority; missing {missing}")
+        certificate = Certificate(
+            name=str(entry["name"]), subject=str(entry["subject"]), authority=str(entry["authority"])
+        )
+
+    return MdmTemplate(apps=tuple(apps), policy=policy, link_app=link, certificate=certificate)

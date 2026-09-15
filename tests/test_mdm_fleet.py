@@ -13,7 +13,7 @@ import pytest
 
 from rmscep.mdm import FleetError, FleetMdm
 from rmscep.mdm.icon import launcher_icon
-from rmscep.mdmtemplate import App, LinkApp, MdmTemplate
+from rmscep.mdmtemplate import App, Certificate, LinkApp, MdmTemplate
 
 TEMPLATE = MdmTemplate(
     apps=(
@@ -36,6 +36,12 @@ class _Fleet:
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.calls.append((request.method, path))
+        if path.endswith("/certificate_authorities"):
+            return httpx.Response(200, json={"certificate_authorities": [{"id": 3, "name": "RMSCEP"}]})
+        if path.endswith("/certificates") and request.method == "GET":
+            return httpx.Response(200, json={"certificates": []})
+        if path.endswith("/certificates"):
+            return httpx.Response(200, json={"id": 27})
         if path == "/api/latest/fleet/teams" and request.method == "GET":
             return httpx.Response(200, json={"teams": [{"id": 7, "name": "rmscep"}]})
         if path.endswith("/software/titles"):
@@ -137,3 +143,34 @@ def test_the_link_app_is_offered_alongside_the_others(monkeypatch: pytest.Monkey
     with_link = MdmTemplate(apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp("Deploy App", "https://x/"))
     result = _mdm(fleet, monkeypatch).apply("rmscep", with_link)
     assert "com.google.enterprise.webapp.test" in result["preinstall"]
+
+
+def test_the_certificate_template_is_stated_before_anything_else(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its subject carries the proof that the MDM assigned this device this callsign
+
+    So it is configuration that gets reviewed and deployed, not something typed into a console.
+    """
+    fleet = _Fleet()
+    with_cert = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR,OU=$OTHER", authority="RMSCEP"),
+    )
+    _mdm(fleet, monkeypatch).apply("rmscep", with_cert)
+    paths = [p for _, p in fleet.calls]
+    assert any(p.endswith("/certificates") for p in paths), "the template must be stated"
+    cert = next(i for i, p in enumerate(paths) if p.endswith("/certificates"))
+    install = next(i for i, p in enumerate(paths) if p.endswith("/software/app_store_apps"))
+    assert cert < install
+
+
+def test_an_unknown_authority_is_named_rather_than_guessed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A template pointing at an authority that is not there would issue nothing, silently"""
+    fleet = _Fleet()
+    with_cert = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR", authority="NOT-THERE"),
+    )
+    with pytest.raises(FleetError, match="NOT-THERE"):
+        _mdm(fleet, monkeypatch).apply("rmscep", with_cert)

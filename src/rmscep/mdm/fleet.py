@@ -214,6 +214,40 @@ class FleetMdm:
         LOGGER.info("Created the launcher web app %s", package)
         return package
 
+    def ensure_certificate(self, team: int, name: str, subject: str, authority: str) -> int:
+        """The template the MDM fills in per device, and asks us to sign
+
+        There is no update in place, so a changed subject is delete then create. The name is kept
+        because it becomes the Android keystore alias, and a device already holding a key under one
+        alias will not accept a second.
+        """
+        authorities = self._call("GET", "/api/latest/fleet/certificate_authorities").get("certificate_authorities", [])
+        match = [a for a in authorities if a.get("name") == authority]
+        if not match:
+            known = ", ".join(sorted(str(a.get("name")) for a in authorities)) or "none"
+            raise FleetError(f"no certificate authority named {authority!r}; the MDM has: {known}")
+        authority_id = int(match[0]["id"])
+
+        existing = self._call("GET", f"/api/latest/fleet/certificates?team_id={team}").get("certificates", [])
+        for template in existing:
+            if template.get("name") != name:
+                continue
+            if (
+                template.get("subject_name") == subject
+                and int(template.get("certificate_authority_id", 0)) == authority_id
+            ):
+                return int(template["id"])
+            self._call("DELETE", f"/api/latest/fleet/certificates/{template['id']}?team_id={team}")
+            LOGGER.info("Replacing certificate template %s, its subject changed", name)
+
+        created = self._call(
+            "POST",
+            "/api/latest/fleet/certificates",
+            {"name": name, "team_id": team, "certificate_authority_id": authority_id, "subject_name": subject},
+        )
+        LOGGER.info("Certificate template %s asks for %s", name, subject)
+        return int(created["id"])
+
     # --- the whole statement --------------------------------------------------
 
     def apply(self, team_name: str, template: MdmTemplate, force_policy: bool = False) -> dict[str, Any]:
@@ -225,6 +259,10 @@ class FleetMdm:
         because that is the only moment apps install.
         """
         team = self.team_id(team_name)
+        if template.certificate:
+            self.ensure_certificate(
+                team, template.certificate.name, template.certificate.subject, template.certificate.authority
+            )
         self.ensure_policy(team, template.policy, force=force_policy)
 
         packages = [app.package for app in template.apps]
