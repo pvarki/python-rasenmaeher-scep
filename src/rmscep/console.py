@@ -16,7 +16,7 @@ from libadvian.logging import init_logging
 from rmscep import __version__
 
 from . import client, config, mdmtemplate
-from .mdm import FleetError, FleetMdm
+from .mdm import FleetError, FleetMdm, ManualMdm
 from .scep import RaIdentity, ScepError
 
 LOGGER = logging.getLogger(__name__)
@@ -229,6 +229,13 @@ def _days_left(certfile: Path) -> int | None:
     "--force-policy", is_flag=True, help="Re-upload the policy even if unchanged, to reach a host that just joined"
 )
 @click.option("--dry-run", is_flag=True, help="Read and validate the template, then stop")
+@click.option(
+    "--mdm",
+    "kind",
+    type=click.Choice(["fleet", "manual"]),
+    default="fleet",
+    help="Which MDM to state this to, or 'manual' to print what to configure by hand",
+)
 def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ctx: click.Context,
     template: str | None,
@@ -237,6 +244,7 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     domain: str | None,
     force_policy: bool,
     dry_run: bool,
+    kind: str,
 ) -> None:
     """Tell the MDM what this deployment's devices need
 
@@ -272,6 +280,13 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     if wanted.link_app:
         click.echo(f"  launcher link {wanted.link_app.title!r} -> {wanted.link_app.url}")
     if dry_run:
+        ctx.exit(0)
+        return
+
+    if kind == "manual":
+        scep_url = f"https://{the_domain}/scep"
+        click.echo("")
+        click.echo(ManualMdm(scep_url).describe(team or config.MDM_TEAM, wanted))
         ctx.exit(0)
         return
 

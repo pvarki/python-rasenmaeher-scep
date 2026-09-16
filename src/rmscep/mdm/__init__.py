@@ -7,5 +7,6 @@ holding an MDM's API token.
 """
 
 from .fleet import FleetError, FleetMdm
+from .manual import ManualMdm
 
-__all__ = ["FleetError", "FleetMdm"]
+__all__ = ["FleetError", "FleetMdm", "ManualMdm"]
