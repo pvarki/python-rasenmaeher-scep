@@ -207,3 +207,61 @@ def test_obtain_cert_renews_when_the_identity_is_running_out(
     else:
         assert certfile.read_bytes() == before, "a healthy certificate must not be churned"
         assert "nothing to do" in second.output
+
+
+def _a_self_signed(common_name: str) -> x509.Certificate:
+    """Something the selftest output can name"""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.datetime.now(datetime.UTC)
+    return (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=30))
+        .sign(key, hashes.SHA256())
+    )
+
+
+def test_selftest_says_what_came_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The point of the command is telling an operator a thing rather than an exit code"""
+    from rmscep import client
+    from rmscep.console import client as console_client
+
+    _ = console_client
+    issued = _a_self_signed("OTTER30")
+    monkeypatch.setattr(client, "fetch_capabilities", lambda *a, **kw: ["POSTPKIOperation", "SHA-256"])
+    monkeypatch.setattr(client, "fetch_ra_certificate", lambda *a, **kw: [issued])
+    monkeypatch.setattr(client, "enrol", lambda *a, **kw: client.Enrolled(certificate=issued, chain=()))
+
+    result = CliRunner().invoke(cli_group, ["selftest", "OTTER30", "--url", "https://x/scep", "--challenge", "c"])
+    assert result.exit_code == 0, result.output
+    assert "SHA-256" in result.output
+    assert "OTTER30" in result.output
+
+
+def test_selftest_reports_a_refusal_rather_than_a_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal is the interesting outcome: it is how an operator learns the callsign is wrong"""
+    from rmscep import client
+    from rmscep.scep import ScepError
+
+    monkeypatch.setattr(client, "fetch_capabilities", lambda *a, **kw: ["SHA-256"])
+    monkeypatch.setattr(client, "fetch_ra_certificate", lambda *a, **kw: [_a_self_signed("rmscep SCEP RA")])
+    monkeypatch.setattr(
+        client, "enrol", lambda *a, **kw: (_ for _ in ()).throw(ScepError("refused (failInfo 1): not planned"))
+    )
+    result = CliRunner().invoke(cli_group, ["selftest", "NOBODY1", "--url", "https://x/scep", "--challenge", "c"])
+    assert result.exit_code == 1
+    assert "failInfo 1" in result.output
+
+
+def test_selftest_needs_a_url_and_a_challenge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both have deployment defaults, so the failure has to name the missing one"""
+    monkeypatch.setattr(config, "DOMAIN", "")
+    monkeypatch.setattr(config, "CHALLENGE", "")
+    runner = CliRunner()
+    assert "RMSCEP_DOMAIN" in runner.invoke(cli_group, ["selftest", "OTTER31"]).output
+    assert "RMSCEP_CHALLENGE" in runner.invoke(cli_group, ["selftest", "OTTER31", "--url", "https://x"]).output

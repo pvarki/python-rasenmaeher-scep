@@ -15,9 +15,9 @@ from libadvian.logging import init_logging
 
 from rmscep import __version__
 
-from . import config, mdmtemplate
+from . import client, config, mdmtemplate
 from .mdm import FleetError, FleetMdm
-from .scep import RaIdentity
+from .scep import RaIdentity, ScepError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -293,4 +293,72 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         ctx.exit(1)
         return
     click.echo(f"Applied to team {result['team_id']}: {len(result['assigned'])} apps assigned")
+    ctx.exit(0)
+
+
+@cli_group.command(name="selftest")
+@click.pass_context
+@click.argument("callsign")
+@click.option("--url", default=None, help="The responder's SCEP URL (default: https://<RMSCEP_DOMAIN>/scep)")
+@click.option("--challenge", default=None, help="The deployment challenge (default: RMSCEP_CHALLENGE)")
+@click.option("--code", default=None, help="The enrolment's approval code, which proves the callsign was assigned")
+@click.option("--insecure", is_flag=True, help="Skip TLS verification, for a deployment using a private CA")
+def selftest(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: click.Context,
+    callsign: str,
+    url: str | None,
+    challenge: str | None,
+    code: str | None,
+    insecure: bool,
+) -> None:
+    """Enrol one callsign the way a device would, and say what came back
+
+    This spends a planned enrolment: the callsign it succeeds with is claimed and cannot be used
+    again. Plan one for the purpose rather than testing with a person's.
+
+    Use it to tell the two failures apart. If this succeeds, the responder, the challenge and the
+    planned callsign are all good, and an MDM that still cannot enrol is failing its half of the
+    contract -- most often by sending no request at all, because its subject template did not
+    resolve. Nothing here knows about any MDM.
+    """
+    the_url = url or (f"https://{config.DOMAIN}/scep" if config.DOMAIN else "")
+    if not the_url:
+        click.echo("Give --url or set RMSCEP_DOMAIN", err=True)
+        ctx.exit(1)
+        return
+    the_challenge = challenge or config.CHALLENGE
+    if not the_challenge:
+        click.echo("Give --challenge or set RMSCEP_CHALLENGE", err=True)
+        ctx.exit(1)
+        return
+
+    verify = not insecure
+    try:
+        caps = client.fetch_capabilities(the_url, verify=verify)
+        click.echo(f"Capabilities: {' '.join(caps)}")
+        offered = client.fetch_ra_certificate(the_url, verify=verify)
+        ra_certificate = client.pick_ra(offered)
+        click.echo(f"RA certificate: {ra_certificate.subject.rfc4514_string()}")
+        for extra in offered:
+            if extra is not ra_certificate:
+                click.echo(f"  chain: {extra.subject.rfc4514_string()}")
+        enrolled = client.enrol(
+            the_url,
+            callsign,
+            the_challenge,
+            proof=f"{callsign}@{code}" if code else None,
+            verify=verify,
+        )
+    except ScepError as exc:
+        click.echo(f"Refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+    except httpx.HTTPError as exc:
+        click.echo(f"Could not reach {the_url}: {exc}", err=True)
+        ctx.exit(1)
+        return
+
+    click.echo(f"Issued: {enrolled.subject}")
+    click.echo(f"  valid until {enrolled.certificate.not_valid_after_utc.isoformat()}")
+    click.echo("  the certified key was generated here and never left, which is the point")
     ctx.exit(0)
