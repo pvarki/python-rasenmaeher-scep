@@ -67,22 +67,58 @@ because the endpoint is public and the callsign is a short human-chosen string t
 guess. RASENMAEHER already generates a random code on every planned row, and the MDM carries it
 into the request's subject alongside the callsign.
 
+What any MDM has to be able to do
+=================================
+
+Nothing in the enrolment path is specific to a product. The responder speaks RFC 8894 and knows
+nothing about any MDM: there is not one product name in the request path. So the question "will
+this MDM work" has three answers and no more.
+
+1. **Point a custom SCEP authority at** ``https://<domain>/scep`` **with the deployment's
+   challenge.** The challenge is a nuisance filter, not a secret, and it is the same for every
+   device. Most MDMs fetch ``GetCACert`` when the authority is saved, so a wrong URL fails at once.
+
+2. **Produce the subject below.** Every MDM words its variables differently; what has to be true is
+   that it can put an operator-set, per-device string into a certificate subject.
+
+3. **Ask for an RSA key of 2048 bits or more.** We advertise ``POSTPKIOperation SHA-256 AES
+   SCEPStandard`` and accept ``PKCSReq`` only. Elliptic curve keys cannot do the key transport SCEP
+   defines, so a profile asking for one cannot enrol.
+
+Pushing applications and device policy is a separate question and it is **not** portable: that
+needs the MDM's own API, so it needs a driver. ``mdm-apply --mdm manual`` prints what to configure
+by hand for an MDM we have no driver for, which is what "works with any MDM" honestly means.
+
 The subject the MDM must produce
 ================================
 
-The MDM has exactly one per-host string an operator can write. Put ``<callsign>@<code>`` in it, and
-render it twice in the certificate template::
+The callsign goes in the common name. The string ``<callsign>@<code>`` goes in **any other**
+attribute::
+
+    CN=OTTER1                    the callsign, and the user's identity from then on
+    OU=OTTER1@7F3A9C2B           the proof the MDM was told to give this device that callsign
+
+RASENMAEHER searches every subject attribute except the common name for the code, so which one the
+MDM renders it into is the MDM's business rather than ours. The common name is excluded on purpose:
+accepting it there would let a caller who guessed the callsign satisfy the check with the guess.
+
+A caller who guesses ``OTTER1`` has no code to put anywhere, is refused before anything is claimed,
+and so cannot spend a callsign either.
+
+One MDM's way of writing it, as an example of the shape rather than as the syntax to copy::
 
     CN=$FLEET_VAR_HOST_END_USER_IDP_USERNAME_LOCAL_PART   →  OTTER1
     OU=$FLEET_VAR_HOST_END_USER_IDP_USERNAME              →  OTTER1@7F3A9C2B
 
-The common name stays the bare callsign, so the issued certificate and the user's identity are
-unchanged. RASENMAEHER searches every subject attribute **except** the common name for the code,
-so which attribute the MDM renders it into is the MDM's business. The common name is excluded on
-purpose: accepting it there would let a caller who guessed the callsign satisfy the check with it.
+**The binding is the part that does not generalise.** Some MDM field has to hold
+``<callsign>@<code>`` for that device, and it has to hold it *before* the device enrols. Which
+field it is differs by product, and a few expose one only per user rather than per device, which
+changes the operator's workflow rather than just the syntax. This is the first thing to check when
+evaluating an MDM, and it is not something code can paper over.
 
-A caller who guesses ``OTTER1`` has no code to put anywhere, and is refused before anything is
-claimed, so guessing cannot spend a callsign either.
+A subject that does not resolve is the failure to expect, and it is silent: the MDM sends no
+request at all, so nothing reaches our logs and only the MDM can say why. ``rmscep selftest`` exists
+to tell that apart from a broken responder.
 
 What a device gets
 ==================
@@ -128,7 +164,13 @@ Operating it
     rmscep obtain-cert             # the client identity, renewed when it is running out
     rmscep mdm-apply               # state what devices need; --force-policy after one joins
     rmscep mdm-apply --dry-run     # validate the document without touching the MDM
+    rmscep mdm-apply --mdm manual  # print what to configure by hand, for an MDM with no driver
+    rmscep selftest CALLSIGN       # enrol as a device would, to prove the responder on its own
     rmscep healthcheck             # RA identity, CA chain, and the client certificate's expiry
+
+``selftest`` spends a planned enrolment, so plan one for the purpose rather than using a person's.
+It is the only thing that separates "the responder is wrong" from "the MDM never asked", which from
+the outside look identical and are answered in completely different places.
 
 Failure, and how it is answered
 ===============================
@@ -163,6 +205,12 @@ than accepting the request's subject.
 
 **Per-user product data is not delivered.** Applications install but come up unconfigured. The
 declaration that would carry it is a later phase.
+
+**Applications and policy are not portable.** The enrolment half works with any MDM that speaks
+SCEP; stating what to install needs that MDM's API. The device policy this deployment ships is
+Android Management API, so it carries to any Android EMM built on that and to nothing else, and
+none of it carries to iOS. A second MDM needs either a driver or an operator following
+``mdm-apply --mdm manual``.
 
 **Nothing watches.** Container logs go to the host's syslog with no aggregation, so a burst of
 refusals, which is what enumeration looks like, is visible only to someone reading a log on the box.
