@@ -390,3 +390,68 @@ def selftest(  # pylint: disable=too-many-arguments,too-many-positional-argument
     click.echo(f"  valid until {enrolled.certificate.not_valid_after_utc.isoformat()}")
     click.echo("  the certified key was generated here and never left, which is the point")
     ctx.exit(0)
+
+
+@cli_group.command(name="mdm-reconcile")
+@click.pass_context
+@click.option("--template", default=None, help="The document saying what to install (default: RMSCEP_MDM_TEMPLATE)")
+@click.option("--mdm-url", default=None, help="Base URL of the MDM API (default: RMSCEP_MDM_URL)")
+@click.option("--team", default=None, help="The group devices join (default: RMSCEP_MDM_TEAM)")
+@click.option("--domain", default=None, help="The deployment's DNS name (default: RMSCEP_DOMAIN)")
+def mdm_reconcile(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: click.Context,
+    template: str | None,
+    mdm_url: str | None,
+    team: str | None,
+    domain: str | None,
+) -> None:
+    """Give a certificate to any device that was named after it enrolled
+
+    Run this on a timer. A device enrols before anyone has named it, because the MDM has no host
+    to name until it does, so the certificate subject cannot be filled in and that first attempt
+    fails. Nothing retries it, which is why an operator who does everything right still ends up
+    with a device that has no certificate.
+
+    It only asks again when asking would change something: re-asking reaches every device in the
+    group, and a template rewritten for nothing is a template rewritten while somebody else is
+    still installing.
+    """
+    path = Path(template) if template else config.MDM_TEMPLATE
+    the_domain = domain or config.DOMAIN
+    if not path or not the_domain:
+        click.echo("Set RMSCEP_MDM_TEMPLATE and RMSCEP_DOMAIN (or pass --template and --domain)", err=True)
+        ctx.exit(1)
+        return
+    url = mdm_url or config.MDM_URL
+    if not url or not config.MDM_TOKEN_FILE or not config.MDM_TOKEN_FILE.is_file():
+        click.echo("Set RMSCEP_MDM_URL and RMSCEP_MDM_TOKEN_FILE", err=True)
+        ctx.exit(1)
+        return
+
+    try:
+        wanted = mdmtemplate.load(path, domain=the_domain, key_alias=config.KEY_ALIAS)
+    except mdmtemplate.TemplateError as exc:
+        click.echo(f"Template refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+    if not wanted.certificate:
+        click.echo("The template states no certificate, so there is nothing to reconcile")
+        ctx.exit(0)
+        return
+
+    mdm = FleetMdm(url, config.MDM_TOKEN_FILE.read_text(encoding="utf-8").strip())
+    the_team = team or config.MDM_TEAM
+    try:
+        waiting = mdm.hosts_awaiting_certificate(mdm.team_id(the_team), wanted.certificate.name)
+        if not waiting:
+            click.echo("Nothing waiting")
+            ctx.exit(0)
+            return
+        click.echo(f"{len(waiting)} device(s) named after enrolment and still without a certificate: {waiting}")
+        mdm.apply(the_team, wanted, force_certificate=True)
+    except FleetError as exc:
+        click.echo(f"The MDM refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+    click.echo("Asked again")
+    ctx.exit(0)

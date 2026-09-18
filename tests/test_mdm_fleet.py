@@ -32,11 +32,22 @@ class _Fleet:
         self.titles: list[dict[str, Any]] = []
         self.profiles: list[dict[str, Any]] = []
         self.certificates: list[dict[str, Any]] = []
+        self.hosts: list[dict[str, Any]] = []
         self._next_id = 100
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.calls.append((request.method, path))
+        if path.endswith("/hosts") and request.method == "GET":
+            return httpx.Response(200, json={"hosts": [{"id": h["id"]} for h in self.hosts]})
+        if path.endswith("/device_mapping"):
+            which = int(path.split("/hosts/")[1].split("/")[0])
+            found = next(h for h in self.hosts if h["id"] == which)
+            return httpx.Response(200, json={"device_mapping": found.get("device_mapping") or []})
+        if "/hosts/" in path and request.method == "GET":
+            which = int(path.rsplit("/", 1)[-1])
+            found = next(h for h in self.hosts if h["id"] == which)
+            return httpx.Response(200, json={"host": {"mdm": {"profiles": found.get("profiles") or []}}})
         if path.endswith("/certificate_authorities"):
             return httpx.Response(200, json={"certificate_authorities": [{"id": 3, "name": "RMSCEP"}]})
         if path.endswith("/certificates") and request.method == "GET":
@@ -226,3 +237,32 @@ def test_forcing_the_certificate_asks_again(monkeypatch: pytest.MonkeyPatch) -> 
     assert any(method == "POST" and path.endswith("/certificates") for method, path in fleet.calls)
     assert len(fleet.certificates) == 1, "the template is replaced, not duplicated"
     assert fleet.certificates[0]["name"] == "rmscep", "the keystore alias has to stay the same"
+
+
+def _host(host_id: int, status: str, named: bool) -> dict[str, Any]:
+    return {
+        "id": host_id,
+        "profiles": [{"name": "rmscep", "status": status}],
+        "device_mapping": [{"email": "OTTER1@CODE", "source": "mdm_idp_accounts"}] if named else [],
+    }
+
+
+def test_a_host_named_after_enrolment_is_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Named, and still refused: asking again would now work"""
+    fleet = _Fleet()
+    fleet.hosts = [_host(1, "failed", named=True)]
+    assert _mdm(fleet, monkeypatch).hosts_awaiting_certificate(1, "rmscep") == [1]
+
+
+def test_a_host_nobody_has_named_is_not_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Asking again changes nothing until somebody names it, and re-asking is not free"""
+    fleet = _Fleet()
+    fleet.hosts = [_host(2, "failed", named=False)]
+    assert _mdm(fleet, monkeypatch).hosts_awaiting_certificate(1, "rmscep") == []
+
+
+def test_a_host_that_already_has_its_certificate_is_not_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Otherwise every pass would re-ask the whole group forever"""
+    fleet = _Fleet()
+    fleet.hosts = [_host(3, "verified", named=True)]
+    assert _mdm(fleet, monkeypatch).hosts_awaiting_certificate(1, "rmscep") == []

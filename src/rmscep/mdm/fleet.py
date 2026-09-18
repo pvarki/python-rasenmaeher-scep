@@ -256,6 +256,31 @@ class FleetMdm:
         LOGGER.info("Certificate template %s asks for %s", name, subject)
         return int(created["id"])
 
+    def hosts_awaiting_certificate(self, team: int, name: str) -> list[int]:
+        """Hosts that were named after they enrolled, and so have no certificate
+
+        The subject is filled in when a device ENROLS, and a device enrols before anyone has named
+        it -- there is no host to name until it does. That first attempt fails, and nothing retries
+        it. These are the hosts for which asking again would now work: named, and still refused.
+
+        Asking again is not free, because it re-asks every device in the group, so this exists to
+        keep that to the occasions when it would change something.
+        """
+        hosts = self._call("GET", f"/api/latest/fleet/hosts?team_id={team}&per_page=500").get("hosts") or []
+        waiting = []
+        for host in hosts:
+            host_id = int(host["id"])
+            detail = self._call("GET", f"/api/latest/fleet/hosts/{host_id}").get("host") or {}
+            profiles = (detail.get("mdm") or {}).get("profiles") or []
+            if not any(p.get("name") == name and p.get("status") == "failed" for p in profiles):
+                continue
+            mapping = (
+                self._call("GET", f"/api/latest/fleet/hosts/{host_id}/device_mapping").get("device_mapping") or []
+            )
+            if any(entry.get("email") for entry in mapping):
+                waiting.append(host_id)
+        return waiting
+
     # --- the whole statement --------------------------------------------------
 
     def apply(
