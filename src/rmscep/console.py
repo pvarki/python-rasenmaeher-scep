@@ -228,6 +228,11 @@ def _days_left(certfile: Path) -> int | None:
 @click.option(
     "--force-policy", is_flag=True, help="Re-upload the policy even if unchanged, to reach a host that just joined"
 )
+@click.option(
+    "--force-certificate",
+    is_flag=True,
+    help="Ask again for the certificate of a host that was named after it enrolled",
+)
 @click.option("--dry-run", is_flag=True, help="Read and validate the template, then stop")
 @click.option(
     "--mdm",
@@ -243,6 +248,7 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     team: str | None,
     domain: str | None,
     force_policy: bool,
+    force_certificate: bool,
     dry_run: bool,
     kind: str,
 ) -> None:
@@ -255,6 +261,11 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     Order matters and is handled for you. Apps install at ENROLMENT and at no other time, so a
     device that has already joined will not pick up a template applied afterwards -- it has to
     enrol again, under a callsign that has not been spent.
+
+    --force-certificate is for the ordinary case, not an exotic one. A device enrols before anyone
+    has named it, because the MDM has no host to name until it does; the certificate subject cannot
+    be filled in yet, and that first attempt fails. Nothing retries it. Run this once the host is
+    named and the device gets its certificate.
     """
     path = Path(template) if template else config.MDM_TEMPLATE
     the_domain = domain or config.DOMAIN
@@ -302,7 +313,9 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     token = config.MDM_TOKEN_FILE.read_text(encoding="utf-8").strip()
 
     try:
-        result = FleetMdm(url, token).apply(team or config.MDM_TEAM, wanted, force_policy=force_policy)
+        result = FleetMdm(url, token).apply(
+            team or config.MDM_TEAM, wanted, force_policy=force_policy, force_certificate=force_certificate
+        )
     except FleetError as exc:
         click.echo(f"The MDM refused: {exc}", err=True)
         ctx.exit(1)

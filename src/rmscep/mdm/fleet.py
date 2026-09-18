@@ -214,12 +214,19 @@ class FleetMdm:
         LOGGER.info("Created the launcher web app %s", package)
         return package
 
-    def ensure_certificate(self, team: int, name: str, subject: str, authority: str) -> int:
+    def ensure_certificate(
+        self, team: int, name: str, subject: str, authority: str, force: bool = False
+    ) -> int:
         """The template the MDM fills in per device, and asks us to sign
 
         There is no update in place, so a changed subject is delete then create. The name is kept
         because it becomes the Android keystore alias, and a device already holding a key under one
         alias will not accept a second.
+
+        force exists because the subject is filled in when a device ENROLS, and a device enrols
+        before anyone has named it -- the host does not exist to be named until then. That first
+        attempt fails, and Fleet never retries a failed certificate on its own. Recreating the
+        template is what asks again, so it is how a named host finally gets its certificate.
         """
         authorities = self._call("GET", "/api/latest/fleet/certificate_authorities").get("certificate_authorities", [])
         match = [a for a in authorities if a.get("name") == authority]
@@ -233,12 +240,13 @@ class FleetMdm:
             if template.get("name") != name:
                 continue
             if (
-                template.get("subject_name") == subject
+                not force
+                and template.get("subject_name") == subject
                 and int(template.get("certificate_authority_id", 0)) == authority_id
             ):
                 return int(template["id"])
             self._call("DELETE", f"/api/latest/fleet/certificates/{template['id']}?team_id={team}")
-            LOGGER.info("Replacing certificate template %s, its subject changed", name)
+            LOGGER.info("Replacing certificate template %s, so it is asked for again", name)
 
         created = self._call(
             "POST",
@@ -250,7 +258,13 @@ class FleetMdm:
 
     # --- the whole statement --------------------------------------------------
 
-    def apply(self, team_name: str, template: MdmTemplate, force_policy: bool = False) -> dict[str, Any]:
+    def apply(
+        self,
+        team_name: str,
+        template: MdmTemplate,
+        force_policy: bool = False,
+        force_certificate: bool = False,
+    ) -> dict[str, Any]:
         """State everything the template says, in the order that actually works
 
         The policy goes in BEFORE the apps: a permission grant only applies to an app that
@@ -261,7 +275,11 @@ class FleetMdm:
         team = self.team_id(team_name)
         if template.certificate:
             self.ensure_certificate(
-                team, template.certificate.name, template.certificate.subject, template.certificate.authority
+                team,
+                template.certificate.name,
+                template.certificate.subject,
+                template.certificate.authority,
+                force=force_certificate,
             )
         self.ensure_policy(team, template.policy, force=force_policy)
 

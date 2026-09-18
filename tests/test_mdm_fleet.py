@@ -31,6 +31,7 @@ class _Fleet:
         self.calls: list[tuple[str, str]] = []
         self.titles: list[dict[str, Any]] = []
         self.profiles: list[dict[str, Any]] = []
+        self.certificates: list[dict[str, Any]] = []
         self._next_id = 100
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -39,9 +40,21 @@ class _Fleet:
         if path.endswith("/certificate_authorities"):
             return httpx.Response(200, json={"certificate_authorities": [{"id": 3, "name": "RMSCEP"}]})
         if path.endswith("/certificates") and request.method == "GET":
-            return httpx.Response(200, json={"certificates": []})
-        if path.endswith("/certificates"):
-            return httpx.Response(200, json={"id": 27})
+            return httpx.Response(200, json={"certificates": self.certificates})
+        if path.endswith("/certificates") and request.method == "POST":
+            body = json.loads(request.content)
+            made = {
+                "id": 27,
+                "name": body["name"],
+                "subject_name": body["subject_name"],
+                "certificate_authority_id": body["certificate_authority_id"],
+            }
+            self.certificates.append(made)
+            return httpx.Response(200, json=made)
+        if "/certificates/" in path and request.method == "DELETE":
+            gone = int(path.rsplit("/", 1)[-1])
+            self.certificates = [c for c in self.certificates if c["id"] != gone]
+            return httpx.Response(200, json={})
         if path == "/api/latest/fleet/teams" and request.method == "GET":
             return httpx.Response(200, json={"teams": [{"id": 7, "name": "rmscep"}]})
         if path.endswith("/software/titles"):
@@ -174,3 +187,42 @@ def test_an_unknown_authority_is_named_rather_than_guessed(monkeypatch: pytest.M
     )
     with pytest.raises(FleetError, match="NOT-THERE"):
         _mdm(fleet, monkeypatch).apply("rmscep", with_cert)
+
+
+def test_an_unchanged_certificate_template_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recreating it re-asks every device in the team, so it is not done for nothing"""
+    fleet = _Fleet()
+    with_cert = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR,OU=$OTHER", authority="RMSCEP"),
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", with_cert)
+    before = len([1 for method, path in fleet.calls if path.endswith("/certificates") and method == "POST"])
+    mdm.apply("rmscep", with_cert)
+    after = len([1 for method, path in fleet.calls if path.endswith("/certificates") and method == "POST"])
+    assert after == before, "an unchanged template must not be recreated"
+
+
+def test_forcing_the_certificate_asks_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordinary recovery: a device enrols before anyone can name it, so the first ask fails
+
+    Fleet never retries a failed certificate, and the template is what asks. Recreating it is the
+    only way a host named after it enrolled ever gets one.
+    """
+    fleet = _Fleet()
+    with_cert = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR,OU=$OTHER", authority="RMSCEP"),
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", with_cert)
+    fleet.calls.clear()
+    mdm.apply("rmscep", with_cert, force_certificate=True)
+
+    assert any(method == "DELETE" and "/certificates/" in path for method, path in fleet.calls)
+    assert any(method == "POST" and path.endswith("/certificates") for method, path in fleet.calls)
+    assert len(fleet.certificates) == 1, "the template is replaced, not duplicated"
+    assert fleet.certificates[0]["name"] == "rmscep", "the keystore alias has to stay the same"
