@@ -27,12 +27,11 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import pkcs7
 from cryptography.x509.oid import NameOID
 
-from .scep import MSG_PKCS_REQ, STATUS_SUCCESS, ScepError, x509_asn1
+# The OID comes from the responder rather than being spelled again here: one definition, one
+# place the test pins it, and no second copy for a scanner to read as a hardcoded credential.
+from .scep import MSG_PKCS_REQ, OID_CHALLENGE_PASSWORD, STATUS_SUCCESS, ScepError, x509_asn1
 
 LOGGER = logging.getLogger(__name__)
-
-#: PKCS#9 challengePassword, the attribute an MDM's SCEP profile fills in
-OID_CHALLENGE_PASSWORD = "1.2.840.113549.1.9.7"
 
 #: RFC 8894 names failInfo values by number. A device sees only the number, so say them in words.
 FAIL_INFO = {
