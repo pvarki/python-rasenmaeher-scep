@@ -214,9 +214,7 @@ class FleetMdm:
         LOGGER.info("Created the launcher web app %s", package)
         return package
 
-    def ensure_certificate(
-        self, team: int, name: str, subject: str, authority: str, force: bool = False
-    ) -> int:
+    def ensure_certificate(self, team: int, name: str, subject: str, authority: str, force: bool = False) -> int:
         """The template the MDM fills in per device, and asks us to sign
 
         There is no update in place, so a changed subject is delete then create. The name is kept
@@ -274,9 +272,7 @@ class FleetMdm:
             profiles = (detail.get("mdm") or {}).get("profiles") or []
             if not any(p.get("name") == name and p.get("status") == "failed" for p in profiles):
                 continue
-            mapping = (
-                self._call("GET", f"/api/latest/fleet/hosts/{host_id}/device_mapping").get("device_mapping") or []
-            )
+            mapping = self._call("GET", f"/api/latest/fleet/hosts/{host_id}/device_mapping").get("device_mapping") or []
             if any(entry.get("email") for entry in mapping):
                 waiting.append(host_id)
         return waiting

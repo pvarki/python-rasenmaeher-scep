@@ -97,7 +97,6 @@ def responder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Test
     _SigningRmapi.refuse = None
 
     with TestClient(get_app_no_init()) as instance:
-
         # Any, not httpx.Response: the test client answers with the Response of whichever httpx
         # it resolved, which is not necessarily the one the responder imports.
         def _get(url: str, **kwargs: Any) -> Any:
