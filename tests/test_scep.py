@@ -86,6 +86,9 @@ def build_pkcs_req(
     device_key: Any = None,
     force_ber: bool = False,
     sign_with_other_key: bool = False,
+    payload_override: bytes | None = None,
+    drop_attribute: str | None = None,
+    empty_attribute: str | None = None,
 ) -> bytes:
     """Assemble a PKCSReq exactly as a client would
 
@@ -102,7 +105,7 @@ def build_pkcs_req(
 
     envelope = (
         pkcs7.PKCS7EnvelopeBuilder()
-        .set_data(csr.public_bytes(serialization.Encoding.DER))
+        .set_data(csr.public_bytes(serialization.Encoding.DER) if payload_override is None else payload_override)
         .add_recipient(ra.cert)
         .encrypt(serialization.Encoding.DER, [pkcs7.PKCS7Options.Binary])
     )
@@ -124,6 +127,17 @@ def build_pkcs_req(
             cms.CMSAttribute({"type": "scep_sender_nonce", "values": [sender_nonce]}),
         ]
     )
+    if drop_attribute or empty_attribute:
+        kept = []
+        for attribute in attrs:
+            name = attribute["type"].native
+            if name == drop_attribute:
+                continue
+            if name == empty_attribute:
+                attribute = cms.CMSAttribute({"type": name, "values": []})
+            kept.append(attribute)
+        attrs = cms.CMSAttributes(kept)
+
     signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048) if sign_with_other_key else key
     signature = _sign(signing_key, attrs.dump())
     is_ec = isinstance(signing_key, ec.EllipticCurvePrivateKey)
@@ -250,3 +264,38 @@ def test_ra_identity_is_stable_and_rsa(tmp_path: Path) -> None:
 def test_challenge_attribute_oid_is_the_standard_one() -> None:
     """Cheap guard against a typo nobody would notice until a device silently failed"""
     assert OID_CHALLENGE_PASSWORD == "1.2.840.113549.1.9.7"
+
+
+@pytest.mark.parametrize("payload", [b"", b"not asn.1 at all", b"\x30\x82\x01\x00" + b"\x00" * 64])
+def test_a_decryptable_request_that_is_not_a_csr_is_refused(ra_identity: RaIdentity, payload: bytes) -> None:
+    """Decrypting only proves the caller had our public key, and anyone can fetch that
+
+    Everything after the decrypt reads bytes the caller chose, so it has to refuse rather than
+    raise: an uncaught exception here is a 500 on an internet facing endpoint.
+    """
+    body = build_pkcs_req(ra_identity, "OTTER1", payload_override=payload)
+    with pytest.raises(ScepError):
+        parse_pkcs_req(body, ra_identity)
+
+
+@pytest.mark.parametrize(
+    "drop",
+    ["scep_transaction_id", "scep_sender_nonce", "scep_message_type"],
+)
+def test_a_missing_scep_attribute_is_refused(ra_identity: RaIdentity, drop: str) -> None:
+    """These reads are reachable with no crypto at all, so they must never raise
+
+    A handful of DER bytes with no transactionID is enough; the caller needs no envelope and no
+    key. An unhandled KeyError here is a 500 and a traceback on an internet facing endpoint.
+    """
+    body = build_pkcs_req(ra_identity, "OTTER1", drop_attribute=drop)
+    with pytest.raises(ScepError):
+        parse_pkcs_req(body, ra_identity)
+
+
+@pytest.mark.parametrize("empty", ["scep_transaction_id", "scep_sender_nonce", "scep_message_type"])
+def test_an_empty_scep_attribute_is_refused(ra_identity: RaIdentity, empty: str) -> None:
+    """An attribute that is present but carries a zero element SET OF indexes out of range"""
+    body = build_pkcs_req(ra_identity, "OTTER1", empty_attribute=empty)
+    with pytest.raises(ScepError):
+        parse_pkcs_req(body, ra_identity)

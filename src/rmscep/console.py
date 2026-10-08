@@ -1,5 +1,6 @@
 """CLI entrypoints for rmscep"""
 
+import datetime
 import logging
 import sys
 from pathlib import Path
@@ -14,8 +15,9 @@ from libadvian.logging import init_logging
 
 from rmscep import __version__
 
-from . import config
-from .scep import RaIdentity
+from . import client, config, mdmtemplate
+from .mdm import FleetError, FleetMdm, ManualMdm
+from .scep import RaIdentity, ScepError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -117,6 +119,12 @@ def client_csr(ctx: click.Context, common_name: str, keyfile: str | None, csrfil
 @click.option("--keyfile", default=None, help="Where to write the private key (default: RMSCEP_KEY)")
 @click.option("--certfile", default=None, help="Where to write the certificate (default: RMSCEP_CERT)")
 @click.option("--force", is_flag=True, help="Replace an identity that already exists")
+@click.option(
+    "--renew-before-days",
+    default=14,
+    show_default=True,
+    help="Replace the identity when it expires within this many days",
+)
 def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ctx: click.Context,
     signer_url: str,
@@ -124,6 +132,7 @@ def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-argum
     keyfile: str | None,
     certfile: str | None,
     force: bool,
+    renew_before_days: int,
 ) -> None:
     """Get our client identity signed by the deployment CA, then exit
 
@@ -131,8 +140,10 @@ def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-argum
     never needs to: something that can ask for a certificate for an arbitrary subject is not a
     privilege an internet facing parser should hold for its whole life.
 
-    Idempotent -- if the identity is already there it does nothing, so restarting the stack does
-    not churn certificates.
+    Idempotent -- an identity that is still good is left alone, so restarting the stack does not
+    churn certificates. One that is expired or close to it is replaced, because nothing renews it
+    while the container keeps running and the signed lifetime is far shorter than the uptime we
+    would like.
     """
     target_key = Path(keyfile) if keyfile else config.KEY
     target_cert = Path(certfile) if certfile else config.CERT
@@ -141,9 +152,15 @@ def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-argum
         ctx.exit(1)
         return
     if target_key.is_file() and target_cert.is_file() and not force:
-        click.echo(f"Identity already in {target_cert}, nothing to do")
-        ctx.exit(0)
-        return
+        remaining = _days_left(target_cert)
+        if remaining is None:
+            click.echo(f"Identity in {target_cert} does not parse, replacing it")
+        elif remaining > renew_before_days:
+            click.echo(f"Identity already in {target_cert}, valid {remaining}d, nothing to do")
+            ctx.exit(0)
+            return
+        else:
+            click.echo(f"Identity in {target_cert} expires in {remaining}d, renewing")
 
     key = ec.generate_private_key(ec.SECP256R1())
     csr = (
@@ -187,3 +204,254 @@ def obtain_cert(  # pylint: disable=too-many-arguments,too-many-positional-argum
 def rmscep_cli() -> None:
     """CLI entrypoint"""
     cli_group()  # pylint: disable=no-value-for-parameter
+
+
+def _days_left(certfile: Path) -> int | None:
+    """Whole days until the certificate expires, or None if it cannot be read
+
+    Negative once it has expired, so the caller renews on the same branch.
+    """
+    try:
+        cert = x509.load_pem_x509_certificate(certfile.read_bytes())
+    except (ValueError, OSError) as exc:
+        LOGGER.warning("Could not read %s: %s", certfile, exc)
+        return None
+    return (cert.not_valid_after_utc - datetime.datetime.now(datetime.UTC)).days
+
+
+@cli_group.command(name="mdm-apply")
+@click.pass_context
+@click.option("--template", default=None, help="The document saying what to install (default: RMSCEP_MDM_TEMPLATE)")
+@click.option("--mdm-url", default=None, help="Base URL of the MDM API (default: RMSCEP_MDM_URL)")
+@click.option("--team", default=None, help="The group devices join (default: RMSCEP_MDM_TEAM)")
+@click.option("--domain", default=None, help="The deployment's DNS name (default: RMSCEP_DOMAIN)")
+@click.option(
+    "--force-policy", is_flag=True, help="Re-upload the policy even if unchanged, to reach a host that just joined"
+)
+@click.option(
+    "--force-certificate",
+    is_flag=True,
+    help="Ask again for the certificate of a host that was named after it enrolled",
+)
+@click.option("--dry-run", is_flag=True, help="Read and validate the template, then stop")
+@click.option(
+    "--mdm",
+    "kind",
+    type=click.Choice(["fleet", "manual"]),
+    default="fleet",
+    help="Which MDM to state this to, or 'manual' to print what to configure by hand",
+)
+def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: click.Context,
+    template: str | None,
+    mdm_url: str | None,
+    team: str | None,
+    domain: str | None,
+    force_policy: bool,
+    force_certificate: bool,
+    dry_run: bool,
+    kind: str,
+) -> None:
+    """Tell the MDM what this deployment's devices need
+
+    An operator runs this when a deployment is set up or its template changes. It is deliberately
+    not part of the responder: something holding an MDM's API token has no business also being an
+    internet facing parser.
+
+    Order matters and is handled for you. Apps install at ENROLMENT and at no other time, so a
+    device that has already joined will not pick up a template applied afterwards -- it has to
+    enrol again, under a callsign that has not been spent.
+
+    --force-certificate is for the ordinary case, not an exotic one. A device enrols before anyone
+    has named it, because the MDM has no host to name until it does; the certificate subject cannot
+    be filled in yet, and that first attempt fails. Nothing retries it. Run this once the host is
+    named and the device gets its certificate.
+    """
+    path = Path(template) if template else config.MDM_TEMPLATE
+    the_domain = domain or config.DOMAIN
+    if not path:
+        click.echo("Give --template or set RMSCEP_MDM_TEMPLATE", err=True)
+        ctx.exit(1)
+        return
+    if not the_domain:
+        click.echo("Give --domain or set RMSCEP_DOMAIN", err=True)
+        ctx.exit(1)
+        return
+
+    try:
+        wanted = mdmtemplate.load(path, domain=the_domain, key_alias=config.KEY_ALIAS)
+    except mdmtemplate.TemplateError as exc:
+        click.echo(f"Template refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+
+    click.echo(f"Template names {len(wanted.apps)} apps, {len(wanted.preinstall_packages)} installed at enrolment")
+    for app in wanted.apps:
+        click.echo(f"  {app.package}{' (at enrolment)' if app.preinstall else ' (on demand)'}")
+    if wanted.link_app:
+        click.echo(f"  launcher link {wanted.link_app.title!r} -> {wanted.link_app.url}")
+    if dry_run:
+        ctx.exit(0)
+        return
+
+    if kind == "manual":
+        scep_url = f"https://{the_domain}/scep"
+        click.echo("")
+        click.echo(ManualMdm(scep_url).describe(team or config.MDM_TEAM, wanted))
+        ctx.exit(0)
+        return
+
+    url = mdm_url or config.MDM_URL
+    if not url:
+        click.echo("Give --mdm-url or set RMSCEP_MDM_URL", err=True)
+        ctx.exit(1)
+        return
+    if not config.MDM_TOKEN_FILE or not config.MDM_TOKEN_FILE.is_file():
+        click.echo("Set RMSCEP_MDM_TOKEN_FILE to a file holding the MDM API token", err=True)
+        ctx.exit(1)
+        return
+    token = config.MDM_TOKEN_FILE.read_text(encoding="utf-8").strip()
+
+    try:
+        result = FleetMdm(url, token).apply(
+            team or config.MDM_TEAM, wanted, force_policy=force_policy, force_certificate=force_certificate
+        )
+    except FleetError as exc:
+        click.echo(f"The MDM refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+    click.echo(f"Applied to team {result['team_id']}: {len(result['assigned'])} apps assigned")
+    ctx.exit(0)
+
+
+@cli_group.command(name="selftest")
+@click.pass_context
+@click.argument("callsign")
+@click.option("--url", default=None, help="The responder's SCEP URL (default: https://<RMSCEP_DOMAIN>/scep)")
+@click.option("--challenge", default=None, help="The deployment challenge (default: RMSCEP_CHALLENGE)")
+@click.option("--code", default=None, help="The enrolment's approval code, which proves the callsign was assigned")
+@click.option("--insecure", is_flag=True, help="Skip TLS verification, for a deployment using a private CA")
+def selftest(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: click.Context,
+    callsign: str,
+    url: str | None,
+    challenge: str | None,
+    code: str | None,
+    insecure: bool,
+) -> None:
+    """Enrol one callsign the way a device would, and say what came back
+
+    This spends a planned enrolment: the callsign it succeeds with is claimed and cannot be used
+    again. Plan one for the purpose rather than testing with a person's.
+
+    Use it to tell the two failures apart. If this succeeds, the responder, the challenge and the
+    planned callsign are all good, and an MDM that still cannot enrol is failing its half of the
+    contract -- most often by sending no request at all, because its subject template did not
+    resolve. Nothing here knows about any MDM.
+    """
+    the_url = url or (f"https://{config.DOMAIN}/scep" if config.DOMAIN else "")
+    if not the_url:
+        click.echo("Give --url or set RMSCEP_DOMAIN", err=True)
+        ctx.exit(1)
+        return
+    the_challenge = challenge or config.CHALLENGE
+    if not the_challenge:
+        click.echo("Give --challenge or set RMSCEP_CHALLENGE", err=True)
+        ctx.exit(1)
+        return
+
+    verify = not insecure
+    try:
+        caps = client.fetch_capabilities(the_url, verify=verify)
+        click.echo(f"Capabilities: {' '.join(caps)}")
+        offered = client.fetch_ra_certificate(the_url, verify=verify)
+        ra_certificate = client.pick_ra(offered)
+        click.echo(f"RA certificate: {ra_certificate.subject.rfc4514_string()}")
+        for extra in offered:
+            if extra is not ra_certificate:
+                click.echo(f"  chain: {extra.subject.rfc4514_string()}")
+        enrolled = client.enrol(
+            the_url,
+            callsign,
+            the_challenge,
+            proof=f"{callsign}@{code}" if code else None,
+            verify=verify,
+        )
+    except ScepError as exc:
+        click.echo(f"Refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+    except httpx.HTTPError as exc:
+        click.echo(f"Could not reach {the_url}: {exc}", err=True)
+        ctx.exit(1)
+        return
+
+    click.echo(f"Issued: {enrolled.subject}")
+    click.echo(f"  valid until {enrolled.certificate.not_valid_after_utc.isoformat()}")
+    click.echo("  the certified key was generated here and never left, which is the point")
+    ctx.exit(0)
+
+
+@cli_group.command(name="mdm-reconcile")
+@click.pass_context
+@click.option("--template", default=None, help="The document saying what to install (default: RMSCEP_MDM_TEMPLATE)")
+@click.option("--mdm-url", default=None, help="Base URL of the MDM API (default: RMSCEP_MDM_URL)")
+@click.option("--team", default=None, help="The group devices join (default: RMSCEP_MDM_TEAM)")
+@click.option("--domain", default=None, help="The deployment's DNS name (default: RMSCEP_DOMAIN)")
+def mdm_reconcile(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: click.Context,
+    template: str | None,
+    mdm_url: str | None,
+    team: str | None,
+    domain: str | None,
+) -> None:
+    """Give a certificate to any device that was named after it enrolled
+
+    Run this on a timer. A device enrols before anyone has named it, because the MDM has no host
+    to name until it does, so the certificate subject cannot be filled in and that first attempt
+    fails. Nothing retries it, which is why an operator who does everything right still ends up
+    with a device that has no certificate.
+
+    It only asks again when asking would change something: re-asking reaches every device in the
+    group, and a template rewritten for nothing is a template rewritten while somebody else is
+    still installing.
+    """
+    path = Path(template) if template else config.MDM_TEMPLATE
+    the_domain = domain or config.DOMAIN
+    if not path or not the_domain:
+        click.echo("Set RMSCEP_MDM_TEMPLATE and RMSCEP_DOMAIN (or pass --template and --domain)", err=True)
+        ctx.exit(1)
+        return
+    url = mdm_url or config.MDM_URL
+    if not url or not config.MDM_TOKEN_FILE or not config.MDM_TOKEN_FILE.is_file():
+        click.echo("Set RMSCEP_MDM_URL and RMSCEP_MDM_TOKEN_FILE", err=True)
+        ctx.exit(1)
+        return
+
+    try:
+        wanted = mdmtemplate.load(path, domain=the_domain, key_alias=config.KEY_ALIAS)
+    except mdmtemplate.TemplateError as exc:
+        click.echo(f"Template refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+    if not wanted.certificate:
+        click.echo("The template states no certificate, so there is nothing to reconcile")
+        ctx.exit(0)
+        return
+
+    mdm = FleetMdm(url, config.MDM_TOKEN_FILE.read_text(encoding="utf-8").strip())
+    the_team = team or config.MDM_TEAM
+    try:
+        waiting = mdm.hosts_awaiting_certificate(mdm.team_id(the_team), wanted.certificate.name)
+        if not waiting:
+            click.echo("Nothing waiting")
+            ctx.exit(0)
+            return
+        click.echo(f"{len(waiting)} device(s) named after enrolment and still without a certificate: {waiting}")
+        mdm.apply(the_team, wanted, force_certificate=True)
+    except FleetError as exc:
+        click.echo(f"The MDM refused: {exc}", err=True)
+        ctx.exit(1)
+        return
+    click.echo("Asked again")
+    ctx.exit(0)

@@ -327,16 +327,28 @@ def parse_pkcs_req(body: bytes, ra: RaIdentity) -> ScepRequest:
     except Exception as exc:
         raise ScepError(f"could not parse the request: {exc}") from exc
 
-    message_type = attrs.get("scep_message_type", [None])[0]
-    if message_type is None or message_type.native != MSG_PKCS_REQ:
-        raise ScepError("only PKCSReq is supported")
-    transaction_id = str(attrs["scep_transaction_id"][0].native)
-    sender_nonce = bytes(attrs["scep_sender_nonce"][0].native)
+    # These read attributes a caller chose, and they are reachable with no crypto at all: a handful
+    # of DER bytes with no transactionID is enough. A missing attribute raises KeyError and one
+    # carrying an empty SET OF raises IndexError, so both have to become refusals here rather than
+    # a traceback and a 500 on an internet facing endpoint.
+    try:
+        message_type = attrs.get("scep_message_type", [None])[0]
+        if message_type is None or message_type.native != MSG_PKCS_REQ:
+            raise ScepError("only PKCSReq is supported")
+        transaction_id = str(attrs["scep_transaction_id"][0].native)
+        sender_nonce = bytes(attrs["scep_sender_nonce"][0].native)
+    except ScepError:
+        raise
+    except Exception as exc:
+        raise ScepError(f"the request is missing a SCEP attribute: {exc}") from exc
 
     certs = [choice.chosen for choice in signed["certificates"]] if signed["certificates"] else []
     if not certs:
         raise ScepError("request carried no device certificate to reply to")
-    device_cert = x509.load_der_x509_certificate(certs[0].dump())
+    try:
+        device_cert = x509.load_der_x509_certificate(certs[0].dump())
+    except Exception as exc:
+        raise ScepError(f"the request's device certificate does not parse: {exc}") from exc
     _verify_signer(signer, device_cert)
 
     # The content is the pkcsPKIEnvelope: a complete ContentInfo(EnvelopedData). Re-encode it as
@@ -355,17 +367,32 @@ def parse_pkcs_req(body: bytes, ra: RaIdentity) -> ScepRequest:
     except Exception as exc:
         raise ScepError(f"could not decrypt the request: {exc}") from exc
 
-    csr = x509.load_der_x509_csr(csr_der)
-    if not csr.is_signature_valid:
+    # Everything from here reads bytes an unauthenticated caller chose. They decrypted, which only
+    # means they had our public key, so they still have to be treated as hostile: an uncaught
+    # exception here is a 500 on an internet facing endpoint rather than a refusal.
+    try:
+        csr = x509.load_der_x509_csr(csr_der)
+        signature_ok = csr.is_signature_valid
+    except Exception as exc:
+        raise ScepError(f"the request did not contain a certificate request: {exc}") from exc
+    if not signature_ok:
         raise ScepError("the certificate request signature does not verify", FAIL_BAD_IDENTITY)
-    common_names = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    try:
+        common_names = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    except Exception as exc:
+        raise ScepError(f"could not read the request subject: {exc}") from exc
     if len(common_names) != 1 or not str(common_names[0].value).strip():
         # An MDM whose subject template has not been filled in yet sends an empty CN. Refusing here
         # means we never ask RASENMAEHER about a callsign nobody could have planned.
         raise ScepError("the certificate request has no single usable common name", FAIL_BAD_IDENTITY)
 
     challenge: str | None = None
-    for attribute in csr.attributes:
+    try:
+        attributes = list(csr.attributes)
+    except Exception as exc:
+        # cryptography raises on duplicate or malformed attributes, and a client controls these
+        raise ScepError(f"could not read the request attributes: {exc}") from exc
+    for attribute in attributes:
         if attribute.oid.dotted_string == OID_CHALLENGE_PASSWORD:
             challenge = attribute.value.decode("utf-8", errors="replace")
 
