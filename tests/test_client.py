@@ -14,7 +14,6 @@ from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -99,16 +98,19 @@ def responder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Test
 
     with TestClient(get_app_no_init()) as instance:
 
-        def _get(url: str, **kwargs: Any) -> httpx.Response:
+        # Any, not httpx.Response: the test client answers with the Response of whichever httpx
+        # it resolved, which is not necessarily the one the responder imports.
+        def _get(url: str, **kwargs: Any) -> Any:
             _ = url
             return instance.get("/scep", params=kwargs.get("params"))
 
-        def _post(url: str, **kwargs: Any) -> httpx.Response:
+        def _post(url: str, **kwargs: Any) -> Any:
             _ = url
             return instance.post("/scep", params=kwargs.get("params"), content=kwargs.get("content"))
 
-        monkeypatch.setattr(client.httpx, "get", _get)
-        monkeypatch.setattr(client.httpx, "post", _post)
+        # Addressed by name: httpx reaches the client module as a plain import, not an export.
+        monkeypatch.setattr("rmscep.client.httpx.get", _get)
+        monkeypatch.setattr("rmscep.client.httpx.post", _post)
         yield instance
 
 

@@ -229,9 +229,7 @@ def _a_self_signed(common_name: str) -> x509.Certificate:
 def test_selftest_says_what_came_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """The point of the command is telling an operator a thing rather than an exit code"""
     from rmscep import client
-    from rmscep.console import client as console_client
 
-    _ = console_client
     issued = _a_self_signed("OTTER30")
     monkeypatch.setattr(client, "fetch_capabilities", lambda *a, **kw: ["POSTPKIOperation", "SHA-256"])
     monkeypatch.setattr(client, "fetch_ra_certificate", lambda *a, **kw: [issued])
