@@ -33,6 +33,7 @@ class _Fleet:
         self.profiles: list[dict[str, Any]] = []
         self.certificates: list[dict[str, Any]] = []
         self.hosts: list[dict[str, Any]] = []
+        self.authorities: list[dict[str, Any]] = [{"id": 3, "name": "RMSCEP", "url": "https://deployment.test/scep"}]
         self._next_id = 100
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -48,8 +49,20 @@ class _Fleet:
             which = int(path.rsplit("/", 1)[-1])
             found = next(h for h in self.hosts if h["id"] == which)
             return httpx.Response(200, json={"host": {"mdm": {"profiles": found.get("profiles") or []}}})
-        if path.endswith("/certificate_authorities"):
-            return httpx.Response(200, json={"certificate_authorities": [{"id": 3, "name": "RMSCEP"}]})
+        if path.endswith("/certificate_authorities") and request.method == "GET":
+            return httpx.Response(200, json={"certificate_authorities": list(self.authorities)})
+        if path.endswith("/certificate_authorities") and request.method == "POST":
+            body = json.loads(request.content)["custom_scep_proxy"]
+            made = {"id": 55, "name": body["name"], "url": body["url"]}
+            self.authorities.append(made)
+            return httpx.Response(200, json={"certificate_authority": made})
+        if "/certificate_authorities/" in path and request.method == "PATCH":
+            which = int(path.rsplit("/", 1)[-1])
+            body = json.loads(request.content)["custom_scep_proxy"]
+            for authority in self.authorities:
+                if authority["id"] == which:
+                    authority["url"] = body["url"]
+            return httpx.Response(200, json={})
         if path.endswith("/certificates") and request.method == "GET":
             return httpx.Response(200, json={"certificates": self.certificates})
         if path.endswith("/certificates") and request.method == "POST":
@@ -266,3 +279,56 @@ def test_a_host_that_already_has_its_certificate_is_not_waiting(monkeypatch: pyt
     fleet = _Fleet()
     fleet.hosts = [_host(3, "verified", named=True)]
     assert _mdm(fleet, monkeypatch).hosts_awaiting_certificate(1, "rmscep") == []
+
+
+def _with_cert(authority: str = "RMSCEP") -> MdmTemplate:
+    """A template that asks for a certificate, which is what drags the authority in"""
+    return MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR,OU=$OTHER", authority=authority),
+    )
+
+
+def test_a_fresh_mdm_gets_the_authority_created(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pointing the MDM at us is configuration, and Fleet lets us do it, so nobody should type it
+
+    Without this a deployment is not set up by running one command: it is one command plus a
+    console, and the console step is the one people get wrong.
+    """
+    fleet = _Fleet()
+    fleet.authorities = []
+    _mdm(fleet, monkeypatch).apply("rmscep", _with_cert(), scep_url="https://new.test/scep", challenge="not-a-secret")
+    created = [c for c in fleet.calls if c == ("POST", "/api/latest/fleet/certificate_authorities")]
+    assert created, "the authority should have been created"
+    assert fleet.authorities[0]["url"] == "https://new.test/scep"
+
+
+def test_an_authority_already_pointing_at_us_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rewriting it for nothing is churn on something every device depends on"""
+    fleet = _Fleet()
+    _mdm(fleet, monkeypatch).apply(
+        "rmscep", _with_cert(), scep_url="https://deployment.test/scep", challenge="not-a-secret"
+    )
+    touched = [c for c in fleet.calls if c[0] in ("POST", "PATCH") and c[1].endswith("certificate_authorities")]
+    assert not touched, "an authority already pointing at us must not be rewritten"
+
+
+def test_a_drifted_authority_is_repointed_not_duplicated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The name is ours, so a different URL means the deployment moved
+
+    Creating a second one would leave the certificate template pointing at whichever the lookup
+    happened to find first.
+    """
+    fleet = _Fleet()
+    _mdm(fleet, monkeypatch).apply("rmscep", _with_cert(), scep_url="https://moved.test/scep", challenge="rotated")
+    assert len(fleet.authorities) == 1, "a drifted authority must be repointed, not duplicated"
+    assert fleet.authorities[0]["url"] == "https://moved.test/scep"
+
+
+def test_without_a_scep_url_the_authority_must_already_exist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The path for an MDM we cannot create one in: state what is there, or say what is missing"""
+    fleet = _Fleet()
+    fleet.authorities = []
+    with pytest.raises(FleetError, match="RMSCEP"):
+        _mdm(fleet, monkeypatch).apply("rmscep", _with_cert())

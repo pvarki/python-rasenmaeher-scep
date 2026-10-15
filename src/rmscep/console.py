@@ -314,7 +314,14 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
 
     try:
         result = FleetMdm(url, token).apply(
-            team or config.MDM_TEAM, wanted, force_policy=force_policy, force_certificate=force_certificate
+            team or config.MDM_TEAM,
+            wanted,
+            force_policy=force_policy,
+            force_certificate=force_certificate,
+            # Fleet can be told what SCEP server this deployment is, so tell it rather than
+            # making an operator retype the URL and challenge into a console.
+            scep_url=f"https://{the_domain}/scep",
+            challenge=config.CHALLENGE,
         )
     except FleetError as exc:
         click.echo(f"The MDM refused: {exc}", err=True)

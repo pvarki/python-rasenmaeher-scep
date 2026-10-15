@@ -214,6 +214,42 @@ class FleetMdm:
         LOGGER.info("Created the launcher web app %s", package)
         return package
 
+    def ensure_authority(self, name: str, scep_url: str, challenge: str) -> int:
+        """The SCEP CA this deployment is, created if the MDM does not have it yet
+
+        Pointing the MDM at a SCEP server is MDM configuration, not protocol, so there is no
+        standard for it and every MDM words it differently. Fleet happens to expose it, so here
+        it is one less thing for an operator to get wrong by hand.
+
+        An existing one is repointed rather than left alone: the name is ours, so a drifted URL
+        or a rotated challenge means this deployment moved, not that somebody else owns it.
+        """
+        authorities = self._call("GET", "/api/latest/fleet/certificate_authorities").get("certificate_authorities", [])
+        match = [a for a in authorities if a.get("name") == name]
+        if match:
+            existing = match[0]
+            authority_id = int(existing["id"])
+            if existing.get("url") == scep_url:
+                return authority_id
+            # The challenge is never compared or logged: Fleet does not hand it back, and a
+            # mismatch would be invisible anyway. Repointing sends the current one regardless.
+            LOGGER.info("Repointing certificate authority %s at %s", name, scep_url)
+            self._call(
+                "PATCH",
+                f"/api/latest/fleet/certificate_authorities/{authority_id}",
+                {"custom_scep_proxy": {"name": name, "url": scep_url, "challenge": challenge}},
+            )
+            return authority_id
+
+        LOGGER.info("Creating certificate authority %s -> %s", name, scep_url)
+        created = self._call(
+            "POST",
+            "/api/latest/fleet/certificate_authorities",
+            {"custom_scep_proxy": {"name": name, "url": scep_url, "challenge": challenge}},
+        )
+        body = created.get("certificate_authority") or created
+        return int(body["id"])
+
     def ensure_certificate(self, team: int, name: str, subject: str, authority: str, force: bool = False) -> int:
         """The template the MDM fills in per device, and asks us to sign
 
@@ -285,6 +321,8 @@ class FleetMdm:
         template: MdmTemplate,
         force_policy: bool = False,
         force_certificate: bool = False,
+        scep_url: str = "",
+        challenge: str = "",
     ) -> dict[str, Any]:
         """State everything the template says, in the order that actually works
 
@@ -292,9 +330,15 @@ class FleetMdm:
         installs while it is already in force, and the key selection rules are what make the
         certificate visible to anything at all. Both have to be true before a device joins,
         because that is the only moment apps install.
+
+        Given scep_url, the certificate authority is created too, so a fresh deployment needs
+        nothing typed into Fleet by hand. Without it the authority must already be there, which
+        is the case for an MDM we cannot create one in.
         """
         team = self.team_id(team_name)
         if template.certificate:
+            if scep_url:
+                self.ensure_authority(template.certificate.authority, scep_url, challenge)
             self.ensure_certificate(
                 team,
                 template.certificate.name,
