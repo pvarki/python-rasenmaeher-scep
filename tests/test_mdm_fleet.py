@@ -50,7 +50,18 @@ class _Fleet:
             found = next(h for h in self.hosts if h["id"] == which)
             return httpx.Response(200, json={"host": {"mdm": {"profiles": found.get("profiles") or []}}})
         if path.endswith("/certificate_authorities") and request.method == "GET":
-            return httpx.Response(200, json={"certificate_authorities": list(self.authorities)})
+            # Fleet's listing omits the url; only the detail carries it. Mirrored so a check
+            # that reads the url off the listing fails here too.
+            return httpx.Response(
+                200,
+                json={
+                    "certificate_authorities": [{k: v for k, v in a.items() if k != "url"} for a in self.authorities]
+                },
+            )
+        if "/certificate_authorities/" in path and request.method == "GET":
+            which = int(path.rsplit("/", 1)[-1])
+            matching = [a for a in self.authorities if a["id"] == which]
+            return httpx.Response(200, json=matching[0] if matching else {})
         if path.endswith("/certificate_authorities") and request.method == "POST":
             body = json.loads(request.content)["custom_scep_proxy"]
             made = {"id": 55, "name": body["name"], "url": body["url"]}

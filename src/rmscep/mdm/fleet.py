@@ -227,9 +227,12 @@ class FleetMdm:
         authorities = self._call("GET", "/api/latest/fleet/certificate_authorities").get("certificate_authorities", [])
         match = [a for a in authorities if a.get("name") == name]
         if match:
-            existing = match[0]
-            authority_id = int(existing["id"])
-            if existing.get("url") == scep_url:
+            authority_id = int(match[0]["id"])
+            # The listing does not carry the url, only the detail does, so compare against the
+            # detail. Reading the url off the listing leaves it None forever, which turns every
+            # run into a repoint of something already pointing at us.
+            detail = self._call("GET", f"/api/latest/fleet/certificate_authorities/{authority_id}")
+            if detail.get("url") == scep_url:
                 return authority_id
             # The challenge is never compared or logged: Fleet does not hand it back, and a
             # mismatch would be invisible anyway. Repointing sends the current one regardless.
