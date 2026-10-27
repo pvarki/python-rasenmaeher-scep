@@ -5,7 +5,9 @@ installs, and an unchanged policy must not be re-uploaded, because a policy rewr
 pass never settles long enough for the device to finish installing anything.
 """
 
+import hashlib
 import json
+import re
 from typing import Any
 
 import httpx
@@ -33,6 +35,7 @@ class _Fleet:
         self.profiles: list[dict[str, Any]] = []
         self.certificates: list[dict[str, Any]] = []
         self.hosts: list[dict[str, Any]] = []
+        self.web_apps: list[dict[str, Any]] = []
         self.authorities: list[dict[str, Any]] = [{"id": 3, "name": "RMSCEP", "url": "https://deployment.test/scep"}]
         self._next_id = 100
 
@@ -98,6 +101,26 @@ class _Fleet:
             return httpx.Response(200, json={"teams": [{"id": 7, "name": "rmscep"}]})
         if path.endswith("/software/titles"):
             return httpx.Response(200, json={"software_titles": list(self.titles)})
+        if path.endswith("/software/web_apps"):
+            # Google derives the package name from the url, so model exactly that: a different
+            # url is a different app, and the same url is the same app.
+            body = request.content.decode("utf-8", "replace")
+            url_match = re.search(r'name="url"\r?\n\r?\n([^\r\n]+)', body)
+            wanted = url_match.group(1) if url_match else ""
+            pkg = "com.google.enterprise.webapp." + hashlib.sha1(wanted.encode()).hexdigest()[:16]
+            title_match = re.search(r'name="title"\r?\n\r?\n([^\r\n]+)', body)
+            self.web_apps.append({"app_store_id": pkg, "url": wanted})
+            # Fleet lists a published web app among the team's software titles, which is what a
+            # lookup by title would find. Without this the stub cannot show that reuse is wrong.
+            self._next_id += 1
+            self.titles.append(
+                {
+                    "id": self._next_id,
+                    "name": title_match.group(1) if title_match else "",
+                    "app_store_app": {"app_store_id": pkg},
+                }
+            )
+            return httpx.Response(200, json={"app_store_id": pkg})
         if path.endswith("/software/app_store_apps"):
             body = json.loads(request.read())
             self._next_id += 1
@@ -358,3 +381,29 @@ def test_repointing_does_not_try_to_rename(monkeypatch: pytest.MonkeyPatch) -> N
     fleet = _Fleet()
     _mdm(fleet, monkeypatch).apply("rmscep", _with_cert(), scep_url="https://moved.test/scep", challenge="rotated")
     assert fleet.authorities[0]["url"] == "https://moved.test/scep", "the repoint must have gone through"
+
+
+def test_the_launcher_points_at_this_deployment_not_the_last_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The web app is identified by its url, never by its title
+
+    Fleet cannot read, change or delete a web app's url, so reusing one because the title matched
+    kept a decommissioned deployment's link and handed every device an icon that opened a host
+    which no longer existed. Everything else about the apply was correct, which is what made it
+    so quiet.
+    """
+    fleet = _Fleet()
+    template = MdmTemplate(
+        apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp(title="Deploy App", url="https://old.test/")
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", template)
+    first = fleet.web_apps[-1]["app_store_id"]
+
+    moved = MdmTemplate(
+        apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp(title="Deploy App", url="https://new.test/")
+    )
+    mdm.apply("rmscep", moved)
+    second = fleet.web_apps[-1]["app_store_id"]
+
+    assert fleet.web_apps[-1]["url"] == "https://new.test/", "the moved deployment must publish its own url"
+    assert second != first, "same title, different url: it must not reuse the old app"
