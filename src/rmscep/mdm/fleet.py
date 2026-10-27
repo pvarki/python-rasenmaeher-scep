@@ -233,11 +233,15 @@ class FleetMdm:
                 return authority_id
             # The challenge is never compared or logged: Fleet does not hand it back, and a
             # mismatch would be invisible anyway. Repointing sends the current one regardless.
+            #
+            # No name in the body. Fleet reads a name on a PATCH as a rename and then refuses it
+            # as a conflict with the authority's own existing name, so sending it turns every
+            # repoint into a 409.
             LOGGER.info("Repointing certificate authority %s at %s", name, scep_url)
             self._call(
                 "PATCH",
                 f"/api/latest/fleet/certificate_authorities/{authority_id}",
-                {"custom_scep_proxy": {"name": name, "url": scep_url, "challenge": challenge}},
+                {"custom_scep_proxy": {"url": scep_url, "challenge": challenge}},
             )
             return authority_id
 

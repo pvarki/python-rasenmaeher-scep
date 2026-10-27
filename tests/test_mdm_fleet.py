@@ -59,6 +59,10 @@ class _Fleet:
         if "/certificate_authorities/" in path and request.method == "PATCH":
             which = int(path.rsplit("/", 1)[-1])
             body = json.loads(request.content)["custom_scep_proxy"]
+            if "name" in body:
+                # Fleet reads a name on a PATCH as a rename and refuses it as a conflict with
+                # the authority's own name. Measured against a live Fleet 4.90.1.
+                return httpx.Response(409, json={"message": "Conflict"})
             for authority in self.authorities:
                 if authority["id"] == which:
                     authority["url"] = body["url"]
@@ -332,3 +336,14 @@ def test_without_a_scep_url_the_authority_must_already_exist(monkeypatch: pytest
     fleet.authorities = []
     with pytest.raises(FleetError, match="RMSCEP"):
         _mdm(fleet, monkeypatch).apply("rmscep", _with_cert())
+
+
+def test_repointing_does_not_try_to_rename(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fleet refuses a PATCH that carries a name, as a conflict with the name already there
+
+    Found against a live Fleet: every repoint answered 409 and no deployment could be moved to
+    a new responder without deleting the authority by hand.
+    """
+    fleet = _Fleet()
+    _mdm(fleet, monkeypatch).apply("rmscep", _with_cert(), scep_url="https://moved.test/scep", challenge="rotated")
+    assert fleet.authorities[0]["url"] == "https://moved.test/scep", "the repoint must have gone through"
