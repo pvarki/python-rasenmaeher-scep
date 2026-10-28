@@ -73,7 +73,7 @@ What any MDM has to be able to do
 
 Nothing in the enrolment path is specific to a product. The responder speaks RFC 8894 and knows
 nothing about any MDM: there is not one product name in the request path. So the question "will
-this MDM work" has three answers and no more.
+this MDM work" has four answers and no more.
 
 1. **Point a custom SCEP authority at** ``https://<domain>/scep`` **with the deployment's
    challenge.** The challenge is a nuisance filter, not a secret, and it is the same for every
@@ -84,7 +84,11 @@ this MDM work" has three answers and no more.
 
 3. **Ask for an RSA key of 2048 bits or more.** We advertise ``POSTPKIOperation SHA-256 AES
    SCEPStandard`` and accept ``PKCSReq`` only. Elliptic curve keys cannot do the key transport SCEP
-   defines, so a profile asking for one cannot enrol.
+   defines, so a profile asking for one is refused with ``badAlg`` before anything is issued; the
+   callsign stays usable once the profile is fixed.
+
+4. **Put the proof in one subject attribute only.** A request with two attributes holding an
+   ``@`` is refused, so one request is one guess at a code.
 
 Pushing applications and device policy is a separate question and it is **not** portable: that
 needs the MDM's own API, so it needs a driver. ``mdm-apply --mdm manual`` prints what to configure

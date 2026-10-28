@@ -48,15 +48,20 @@ STATUS_SUCCESS = "0"
 STATUS_FAILURE = "2"
 FAIL_BAD_REQUEST = "2"
 FAIL_BAD_IDENTITY = "1"
+FAIL_BAD_ALG = "0"
 
 # What we tell clients we can do. POSTPKIOperation keeps the request out of the query string,
 # SHA-256 and AES keep them off MD5 and DES, which is what a client falls back to when nothing
 # better is advertised. SCEPStandard means RFC 8894 rather than the older draft.
 CAPS = "POSTPKIOperation\nSHA-256\nAES\nSCEPStandard\n"
 
-# A PKCSReq is a few kilobytes. Anything larger is not a device we want to spend a private key
-# operation on.
-MAX_REQUEST_BYTES = 64 * 1024
+# A PKCSReq is 2.5 KB with a 2048-bit key and 6.3 KB with 8192 bits. Anything larger is not a
+# device we want to spend a private key operation on.
+MAX_REQUEST_BYTES = 16 * 1024
+
+# A device subject is a callsign and the enrolment proof, plus whatever few fields an MDM template
+# adds. Many more is somebody packing guesses.
+MAX_SUBJECT_ATTRIBUTES = 8
 
 
 class _SetOfPrintableString(core.SetOf):  # type: ignore[misc]
@@ -385,6 +390,13 @@ def parse_pkcs_req(body: bytes, ra: RaIdentity) -> ScepRequest:
         # An MDM whose subject template has not been filled in yet sends an empty CN. Refusing here
         # means we never ask RASENMAEHER about a callsign nobody could have planned.
         raise ScepError("the certificate request has no single usable common name", FAIL_BAD_IDENTITY)
+    subject = list(csr.subject)
+    if len(subject) > MAX_SUBJECT_ATTRIBUTES:
+        raise ScepError("the certificate request subject has too many attributes", FAIL_BAD_REQUEST)
+    if sum(1 for attribute in subject if "@" in str(attribute.value)) > 1:
+        # RASENMAEHER takes the enrolment proof from one attribute only; more is a request testing
+        # several codes at once.
+        raise ScepError("the certificate request carries more than one enrolment proof", FAIL_BAD_REQUEST)
 
     challenge: str | None = None
     try:

@@ -7,12 +7,14 @@ stop and report a failed certificate instead of retrying for ever.
 
 import logging
 
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import APIRouter, Request, Response
 
 from .. import config
 from ..rmapi import Client, RmapiRefused, RmapiUnavailable
 from ..scep import (
     CAPS,
+    FAIL_BAD_ALG,
     FAIL_BAD_IDENTITY,
     FAIL_BAD_REQUEST,
     MAX_REQUEST_BYTES,
@@ -92,6 +94,10 @@ async def scep_post(request: Request, operation: str = "") -> Response:
 
     if not parsed.challenge:
         return refuse("no challenge", FAIL_BAD_REQUEST)
+    if not isinstance(parsed.device_cert.public_key(), rsa.RSAPublicKey):
+        # The certificate goes back encrypted to this key, and that needs RSA. Refused before
+        # RASENMAEHER issues anything, so an MDM set to curve keys does not spend the callsign.
+        return refuse("the device key is not RSA", FAIL_BAD_ALG)
 
     try:
         # RASENMAEHER checks the challenge, and whether an admin has opened enrolment at all, so

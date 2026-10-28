@@ -13,7 +13,7 @@ import pytest
 from asn1crypto import cms
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
 
@@ -137,6 +137,15 @@ def test_the_device_challenge_is_passed_on(client: TestClient, tmp_path: Path) -
     ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
     client.post("/scep", params={"operation": "PKIOperation"}, content=build_pkcs_req(ra, ISSUED_CALLSIGN))
     assert _StubRmapi.seen["challenge"] == CHALLENGE
+
+
+def test_a_curve_device_key_is_refused_before_anything_is_issued(client: TestClient, tmp_path: Path) -> None:
+    """The certificate could not be encrypted back to it, so asking for one would spend the callsign"""
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN, device_key=ec.generate_private_key(ec.SECP256R1()))
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
+    assert _pki_status(response.content) == ("2", "0")
+    assert not _StubRmapi.seen, "RASENMAEHER must not be asked to issue it"
 
 
 def test_a_request_without_a_challenge_is_refused_here(client: TestClient, tmp_path: Path) -> None:

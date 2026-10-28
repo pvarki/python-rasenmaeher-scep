@@ -89,6 +89,7 @@ def build_pkcs_req(
     payload_override: bytes | None = None,
     drop_attribute: str | None = None,
     empty_attribute: str | None = None,
+    subject_extra: list[tuple[Any, str]] | None = None,
 ) -> bytes:
     """Assemble a PKCSReq exactly as a client would
 
@@ -97,7 +98,10 @@ def build_pkcs_req(
     """
     key = device_key or rsa.generate_private_key(public_exponent=65537, key_size=2048)
     builder = x509.CertificateSigningRequestBuilder().subject_name(
-        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, callsign)])
+        x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, callsign)]
+            + [x509.NameAttribute(oid, value) for oid, value in subject_extra or []]
+        )
     )
     if challenge is not None:
         builder = builder.add_attribute(x509.ObjectIdentifier(OID_CHALLENGE_PASSWORD), challenge.encode("utf-8"))
@@ -184,15 +188,28 @@ def test_round_trip(ra_identity: RaIdentity) -> None:
 def test_elliptic_curve_device_key(ra_identity: RaIdentity) -> None:
     """A device whose own key is a curve is fine
 
-    Only the RA key has to be RSA, because the envelope is RSA key transport. What the device puts
-    in the request is its own business, and a curve is the better choice wherever the MDM offers
-    one, so the responder has to verify an ECDSA signed request.
+    Parsing it has to work, so that the refusal can be a signed answer rather than a crash: the
+    certificate goes back encrypted to the device key, which needs RSA, and the view refuses it.
     """
     body = build_pkcs_req(ra_identity, "OTTER2", device_key=ec.generate_private_key(ec.SECP256R1()))
     parsed = parse_pkcs_req(body, ra_identity)
     assert parsed.common_name == "OTTER2"
     request = x509.load_pem_x509_csr(parsed.csr_pem.encode("utf-8"))
     assert isinstance(request.public_key(), ec.EllipticCurvePublicKey)
+
+
+def test_one_request_carries_one_enrolment_proof(ra_identity: RaIdentity) -> None:
+    """A guess per attribute would test hundreds of codes in one request"""
+    proof = [(NameOID.ORGANIZATIONAL_UNIT_NAME, "OTTER7@7F3A9C2B")]
+    assert parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER7", subject_extra=proof), ra_identity)
+
+    batched = proof + [(NameOID.ORGANIZATIONAL_UNIT_NAME, "OTTER7@AAAAAAAA")]
+    with pytest.raises(ScepError):
+        parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER7", subject_extra=batched), ra_identity)
+
+    padded = [(NameOID.ORGANIZATIONAL_UNIT_NAME, f"unit{n}") for n in range(8)]
+    with pytest.raises(ScepError):
+        parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER7", subject_extra=padded), ra_identity)
 
 
 def test_ber_encoded_envelope(ra_identity: RaIdentity) -> None:
