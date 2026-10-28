@@ -31,7 +31,7 @@ class ManualMdm:
             "",
             "1. A SCEP certificate authority",
             f"     URL       {self.scep_url}",
-            "     challenge the value of RMSCEP_CHALLENGE",
+            "     challenge the one on the admin UI's MDM page",
             "",
             "   Most MDMs fetch GetCACert when the CA is saved, so a wrong URL fails immediately.",
             "   That makes saving it the cheapest proof the responder is reachable at all.",

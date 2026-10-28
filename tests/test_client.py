@@ -50,9 +50,10 @@ class _SigningRmapi:
         pass
 
     async def complete_enrollment(self, callsign: str, csrpem: str, **kwargs: Any) -> IssuedCertificate:
-        _ = kwargs
         if _SigningRmapi.refuse is not None:
             raise _SigningRmapi.refuse
+        if kwargs.get("challenge") != CHALLENGE:
+            raise RmapiRefused("HTTP 403")
         csr = x509.load_pem_x509_csr(csrpem.encode("utf-8"))
         ca_key, ca_name = _ca_key_and_name()
         now = datetime.datetime.now(datetime.UTC)
@@ -91,7 +92,6 @@ def responder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Test
     chain.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "CA_CHAIN_PATH", chain)
-    monkeypatch.setattr(config, "CHALLENGE", CHALLENGE)
     monkeypatch.setattr(config, "RMAPI_URL", "https://rasenmaeher.test")
     monkeypatch.setattr(scep_views, "Client", _SigningRmapi)
     _SigningRmapi.refuse = None

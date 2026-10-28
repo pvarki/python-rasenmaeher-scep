@@ -4,6 +4,7 @@ One call, and what matters is that each answer is turned into the right thing to
 A refusal is final; an outage is worth retrying.
 """
 
+import json
 from pathlib import Path
 
 import httpx
@@ -56,15 +57,20 @@ async def test_success(monkeypatch: pytest.MonkeyPatch) -> None:
         seen["url"] = str(request.url)
         seen["request-id"] = request.headers.get("X-Request-ID")
         seen["forwarded"] = request.headers.get("X-Forwarded-For")
+        seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={"success": True, "certificate": CERT})
 
     client = _client(handler, monkeypatch)
-    issued = await client.complete_enrollment("OTTER1", "csr", request_id="abc", forwarded_for="10.0.0.1")
+    issued = await client.complete_enrollment(
+        "OTTER1", "csr", challenge="from-the-device", request_id="abc", forwarded_for="10.0.0.1"
+    )
     assert issued == IssuedCertificate(callsign="OTTER1", certificate=CERT)
     assert seen["url"] == "https://rasenmaeher.test/api/v1/enrollment/accept"
     # Passed through so the audit line joins ours and shows the MDM, not this container
     assert seen["request-id"] == "abc"
     assert seen["forwarded"] == "10.0.0.1"
+    # RASENMAEHER owns the challenge, so the device's goes along unchecked
+    assert seen["body"] == {"callsign": "OTTER1", "csr": "csr", "challenge": "from-the-device"}
 
 
 @pytest.mark.asyncio

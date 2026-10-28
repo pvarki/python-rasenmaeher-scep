@@ -10,8 +10,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from rmscep import config
-
 from .test_scep import CHALLENGE, build_pkcs_req
 from .test_web import ISSUED_CALLSIGN, client  # noqa: F401  -- the fixture is used by name
 
@@ -63,4 +61,3 @@ def test_the_challenge_is_never_logged(
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert CHALLENGE not in logged, "the configured challenge reached the log"
     assert "a-wrong-one-0987" not in logged, "the challenge a caller sent reached the log"
-    assert config.CHALLENGE not in logged

@@ -23,9 +23,9 @@ RMAPI_URL: str = cfg("RMAPI_URL", cast=str, default="")
 CERT: Path | None = cfg("CERT", cast=Path, default=None)
 KEY: Path | None = cfg("KEY", cast=Path, default=None)
 
-#: What the MDM must present in the certificate request. Not a secret: it sits in the MDM's own
-#: configuration and travels in every device's request. It keeps noise off the endpoint; the
-#: control is that an admin planned the callsign.
+#: The challenge shown on the admin UI's MDM page, for the commands that configure or test an MDM
+#: (mdm-apply, selftest). The responder itself does not read it: it passes each device's challenge
+#: on to RASENMAEHER, which owns it and decides whether enrolment is open at all.
 CHALLENGE: str = cfg("CHALLENGE", cast=str, default="")
 
 #: The deployment's CA chain, handed to devices in GetCACert so they trust what they are issued.

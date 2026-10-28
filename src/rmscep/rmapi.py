@@ -79,13 +79,15 @@ class Client:
         self,
         callsign: str,
         csrpem: str,
+        challenge: str | None = None,
         request_id: str | None = None,
         forwarded_for: str | None = None,
     ) -> IssuedCertificate:
         """Complete the enrolment an admin planned for this callsign, with the device's own request
 
-        `request_id` and `forwarded_for` are passed through so RASENMAEHER's audit line can be
-        joined to ours, and shows the MDM's address rather than this container's.
+        `challenge` is the device's, passed on for RASENMAEHER to check. `request_id` and
+        `forwarded_for` are passed through so RASENMAEHER's audit line can be joined to ours, and
+        shows the MDM's address rather than this container's.
         """
         url = f"{self.base_url}/api/v1/enrollment/accept"
         headers: dict[str, str] = {}
@@ -96,7 +98,9 @@ class Client:
 
         try:
             async with self._client() as client:
-                response = await client.post(url, json={"callsign": callsign, "csr": csrpem}, headers=headers)
+                response = await client.post(
+                    url, json={"callsign": callsign, "csr": csrpem, "challenge": challenge}, headers=headers
+                )
         except httpx.HTTPError as exc:
             LOGGER.warning("Could not reach RASENMAEHER: %s", exc)
             raise RmapiUnavailable(str(exc)) from exc

@@ -34,7 +34,7 @@ docker create --name rmscep_devel -v $(pwd):/app -p 8000:8000 -it $(echo $DOCKER
 docker start -i rmscep_devel
 ```
 
-Nothing runs without `RMSCEP_RMAPI_URL` and `RMSCEP_CHALLENGE`; see README.rst for the rest.
+Nothing enrols without `RMSCEP_RMAPI_URL`; see README.rst for the rest.
 
 ## Running Tests
 
@@ -71,8 +71,8 @@ operation. `cryptography` refuses an elliptic curve recipient outright. Everythi
 is a curve; this one thing cannot be.
 
 **The challenge is not a secret.** It sits in the MDM's configuration and travels in every device's
-request. It keeps noise off the endpoint. The control is that an admin planned the callsign, and it
-lives in RASENMAEHER, not here. Do not log it, and do not let it grow into a credential.
+request. It keeps noise off the endpoint. RASENMAEHER owns it and checks it, together with whether
+an admin has opened enrolment; the control is that an admin planned the callsign. Do not log it, and do not let it grow into a credential.
 
 **Refuse, do not guess.** Every refusal is a signed CertRep carrying a failInfo, so the MDM reports
 a failed certificate instead of retrying for ever. There is no PENDING state: every answer is final.

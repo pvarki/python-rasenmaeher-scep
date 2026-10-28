@@ -7,7 +7,7 @@ responder makes before and after it asks.
 import datetime
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from asn1crypto import cms
@@ -47,17 +47,21 @@ def _a_certificate(common_name: str) -> str:
 
 
 class _StubRmapi:
-    """Stands in for RASENMAEHER"""
+    """Stands in for RASENMAEHER, which owns the challenge"""
 
     raises: Exception | None = None
+    seen: ClassVar[dict[str, Any]] = {}
 
     def __init__(self) -> None:
         pass
 
     async def complete_enrollment(self, callsign: str, csrpem: str, **kwargs: Any) -> IssuedCertificate:
-        _ = csrpem, kwargs
+        _ = csrpem
+        _StubRmapi.seen = kwargs
         if _StubRmapi.raises is not None:
             raise _StubRmapi.raises
+        if kwargs.get("challenge") != CHALLENGE:
+            raise RmapiRefused("HTTP 403")
         return IssuedCertificate(callsign=callsign, certificate=_a_certificate(callsign))
 
 
@@ -68,10 +72,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[TestCli
     ca_chain.write_text(_a_certificate("Test CA"), encoding="utf-8")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "CA_CHAIN_PATH", ca_chain)
-    monkeypatch.setattr(config, "CHALLENGE", CHALLENGE)
     monkeypatch.setattr(config, "RMAPI_URL", "https://rasenmaeher.test")
     monkeypatch.setattr(scep_views, "Client", _StubRmapi)
     _StubRmapi.raises = None
+    _StubRmapi.seen = {}
     with TestClient(get_app_no_init()) as instance:
         yield instance
 
@@ -120,7 +124,7 @@ def test_enrolment(client: TestClient, tmp_path: Path) -> None:
 
 
 def test_wrong_challenge_is_refused(client: TestClient, tmp_path: Path) -> None:
-    """The challenge is a nuisance filter, but it is still checked"""
+    """RASENMAEHER checks the challenge, and its refusal reaches the device as a final answer"""
     ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
     body = build_pkcs_req(ra, ISSUED_CALLSIGN, challenge="not the one")
     response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
@@ -128,15 +132,20 @@ def test_wrong_challenge_is_refused(client: TestClient, tmp_path: Path) -> None:
     assert _pki_status(response.content) == ("2", "1")
 
 
-def test_no_challenge_configured_refuses_everything(
-    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unconfigured responder must not become an open endpoint"""
-    monkeypatch.setattr(config, "CHALLENGE", "")
+def test_the_device_challenge_is_passed_on(client: TestClient, tmp_path: Path) -> None:
+    """RASENMAEHER owns the challenge, so what the device sent is handed over unchanged"""
     ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
-    body = build_pkcs_req(ra, ISSUED_CALLSIGN)
+    client.post("/scep", params={"operation": "PKIOperation"}, content=build_pkcs_req(ra, ISSUED_CALLSIGN))
+    assert _StubRmapi.seen["challenge"] == CHALLENGE
+
+
+def test_a_request_without_a_challenge_is_refused_here(client: TestClient, tmp_path: Path) -> None:
+    """No challenge can never be right, so RASENMAEHER is not even asked"""
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN, challenge=None)
     response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
     assert _pki_status(response.content)[0] == "2"
+    assert not _StubRmapi.seen
 
 
 def test_a_refusal_is_final_and_signed(client: TestClient, tmp_path: Path) -> None:
@@ -182,7 +191,7 @@ def test_healthcheck_reports_configuration(client: TestClient, monkeypatch: pyte
     assert healthy["healthy"] is True
     assert "RA serial" in str(healthy["extra"])
 
-    monkeypatch.setattr(config, "CHALLENGE", "")
+    monkeypatch.setattr(config, "RMAPI_URL", "")
     idle = client.get("/api/v1/healthcheck").json()
     assert idle["healthy"] is True, "unconfigured is idle, not broken -- autoheal would loop otherwise"
     assert "enrolment refused" in str(idle["extra"])

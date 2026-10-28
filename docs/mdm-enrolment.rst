@@ -51,7 +51,8 @@ Four things gate an enrolment, and it is worth being precise about which of them
 
 **The SCEP challenge is not a secret.** It sits in the MDM's configuration and travels in every
 device's request. It keeps noise off the endpoint and nothing more. Any design that relies on it
-being confidential is wrong.
+being confidential is wrong. RASENMAEHER makes it and checks it, and refuses every device until an
+admin opens enrolment on the MDM page; the window closes itself.
 
 **The agent certificate** says only "this caller may complete a device enrolment an admin already
 planned". Its CN is listed in RASENMAEHER's ``RM_MDM_AGENT_CNS``. It deliberately is **not** a

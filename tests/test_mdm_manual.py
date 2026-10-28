@@ -51,7 +51,7 @@ def test_it_carries_the_scep_url_and_points_at_the_challenge_without_printing_it
     """A report is not a place to copy a credential to, even a deliberately weak one"""
     report = ManualMdm(URL).describe("a-group", _a_template())
     assert URL in report
-    assert "RMSCEP_CHALLENGE" in report
+    assert "MDM page" in report
 
 
 def test_it_lists_the_apps_and_their_configuration() -> None:

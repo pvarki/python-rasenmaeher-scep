@@ -39,8 +39,6 @@ async def request_healthcheck(request: Request) -> ProductHealthCheckResponse:
     # Not being configured to enrol anything is a deployment that has not turned this on yet, not
     # a service that is failing. Saying otherwise would have the compose autoheal watcher restart
     # a perfectly functioning container for ever. It is reported, and logged loudly at startup.
-    if not config.CHALLENGE:
-        notes.append("no challenge set, enrolment refused")
     if not config.RMAPI_URL:
         notes.append("no RASENMAEHER URL set, enrolment refused")
 

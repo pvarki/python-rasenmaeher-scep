@@ -90,17 +90,16 @@ async def scep_post(request: Request, operation: str = "") -> Response:
             media_type=PKI_MESSAGE,
         )
 
-    if not config.CHALLENGE:
-        # Refusing to run without one is deliberate: an empty setting would otherwise mean an
-        # endpoint that accepts anything, which is the opposite of what it is for.
-        return refuse("no challenge is configured", FAIL_BAD_REQUEST)
-    if parsed.challenge != config.CHALLENGE:
-        return refuse("wrong challenge", FAIL_BAD_IDENTITY)
+    if not parsed.challenge:
+        return refuse("no challenge", FAIL_BAD_REQUEST)
 
     try:
+        # RASENMAEHER checks the challenge, and whether an admin has opened enrolment at all, so
+        # both can be changed from the admin UI rather than by redeploying this.
         issued = await Client().complete_enrollment(
             callsign=callsign,
             csrpem=parsed.csr_pem,
+            challenge=parsed.challenge,
             request_id=request.headers.get("X-Request-ID"),
             forwarded_for=request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP"),
         )
