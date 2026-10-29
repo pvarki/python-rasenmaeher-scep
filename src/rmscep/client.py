@@ -6,8 +6,8 @@ common one -- a subject template that does not resolve produces no request at al
 stay silent and say nothing about why.
 
 This is the other half of that question. It speaks RFC 8894 and knows nothing about any MDM, so a
-run that succeeds here says the responder, the challenge and the planned callsign are all good,
-and anything still broken is on the MDM's side of the contract.
+run that succeeds here says the responder, the challenge and the open enrolment window are all
+good, and anything still broken is on the MDM's side of the contract.
 
 It is a test client and not a device: the key it makes lives for one run and is thrown away.
 """
@@ -36,7 +36,7 @@ LOGGER = logging.getLogger(__name__)
 #: RFC 8894 names failInfo values by number. A device sees only the number, so say them in words.
 FAIL_INFO = {
     "0": "the CA does not support the algorithm we asked for",
-    "1": "the request was refused: wrong challenge, or the callsign is not planned for a device",
+    "1": "the request was refused: wrong challenge, enrolment closed, or the name is taken",
     "2": "the request was malformed",
     "3": "the signature did not verify",
     "4": "the request was not authorised",
@@ -128,17 +128,9 @@ def _self_signed(key: rsa.RSAPrivateKey, subject: x509.Name) -> x509.Certificate
     )
 
 
-def build_subject(callsign: str, proof: str | None) -> x509.Name:
-    """CN carries the callsign, one more RDN carries the proof the MDM assigned it
-
-    RASENMAEHER accepts the proof in any attribute that is not the common name, so which one is
-    the MDM's choice and not ours. OU is used here because it is the one every MDM's subject
-    template can write.
-    """
-    attributes = [x509.NameAttribute(NameOID.COMMON_NAME, callsign)]
-    if proof:
-        attributes.append(x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, proof))
-    return x509.Name(attributes)
+def build_subject(callsign: str) -> x509.Name:
+    """The CN carries the name, which becomes the device's callsign"""
+    return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, callsign)])
 
 
 def build_pkcs_req(
@@ -233,7 +225,6 @@ def enrol(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     base_url: str,
     callsign: str,
     challenge: str,
-    proof: str | None = None,
     verify: Any = True,
     timeout: float = 60.0,
 ) -> Enrolled:
@@ -248,7 +239,7 @@ def enrol(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     body, device_cert = build_pkcs_req(
         ra_certificate,
         key,
-        build_subject(callsign, proof),
+        build_subject(callsign),
         challenge,
         transaction_id,
         secrets.token_bytes(16),

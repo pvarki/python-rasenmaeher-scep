@@ -249,7 +249,7 @@ def test_selftest_reports_a_refusal_rather_than_a_traceback(monkeypatch: pytest.
     monkeypatch.setattr(client, "fetch_capabilities", lambda *a, **kw: ["SHA-256"])
     monkeypatch.setattr(client, "fetch_ra_certificate", lambda *a, **kw: [_a_self_signed("rmscep SCEP RA")])
     monkeypatch.setattr(
-        client, "enrol", lambda *a, **kw: (_ for _ in ()).throw(ScepError("refused (failInfo 1): not planned"))
+        client, "enrol", lambda *a, **kw: (_ for _ in ()).throw(ScepError("refused (failInfo 1): taken"))
     )
     result = CliRunner().invoke(cli_group, ["selftest", "NOBODY1", "--url", "https://x/scep", "--challenge", "c"])
     assert result.exit_code == 1

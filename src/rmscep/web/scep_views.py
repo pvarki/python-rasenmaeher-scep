@@ -96,7 +96,7 @@ async def scep_post(request: Request, operation: str = "") -> Response:
         return refuse("no challenge", FAIL_BAD_REQUEST)
     if not isinstance(parsed.device_cert.public_key(), rsa.RSAPublicKey):
         # The certificate goes back encrypted to this key, and that needs RSA. Refused before
-        # RASENMAEHER issues anything, so an MDM set to curve keys does not spend the callsign.
+        # RASENMAEHER issues anything, so an MDM set to curve keys does not spend the name.
         return refuse("the device key is not RSA", FAIL_BAD_ALG)
 
     try:
@@ -110,8 +110,8 @@ async def scep_post(request: Request, operation: str = "") -> Response:
             forwarded_for=request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP"),
         )
     except RmapiRefused as exc:
-        # Not planned, already taken, or not ours to complete. The device cannot fix this by
-        # retrying; the operator plans another callsign.
+        # Closed, already taken, or not a name a callsign may be. The device cannot fix this by
+        # retrying; the operator opens enrolment or changes the MDM's name for it.
         return refuse(f"rasenmaeher refused ({exc})", FAIL_BAD_IDENTITY)
     except RmapiUnavailable as exc:
         # Somebody else's bad day, not a verdict on this device, so it must NOT get a signed

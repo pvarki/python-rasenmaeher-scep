@@ -44,9 +44,9 @@ class App:
 class Certificate:
     """The certificate the MDM asks us for on a device's behalf
 
-    ``subject`` is security configuration, not cosmetics: it is what carries the per-enrolment
-    code that proves the MDM assigned this device this callsign. It lives here so it is reviewed
-    and deployed like everything else, rather than typed into a console once and forgotten.
+    ``subject`` is identity configuration, not cosmetics: its common name becomes the device's
+    callsign. It lives here so it is reviewed and deployed like everything else, rather than typed
+    into a console once and forgotten.
 
     ``name`` becomes the Android keystore alias, and installing a second key under an existing
     alias fails, so it is per deployment rather than per device.

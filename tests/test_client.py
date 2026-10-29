@@ -30,7 +30,6 @@ from rmscep.web.application import get_app_no_init
 from .test_scep import CHALLENGE
 
 CALLSIGN = "OTTER21"
-CODE = "7F3A9C2B"
 URL = "https://responder.test/scep"
 
 
@@ -144,15 +143,14 @@ def test_picking_the_ra_falls_back_rather_than_failing(responder: TestClient) ->
 def test_enrolment_certifies_the_key_the_client_generated(responder: TestClient) -> None:
     """The property the whole design exists to give: the private key never left"""
     _ = responder
-    enrolled = client.enrol(URL, CALLSIGN, CHALLENGE, proof=f"{CALLSIGN}@{CODE}")
-    assert f"CN={CALLSIGN}" in enrolled.subject
-    assert CODE in enrolled.subject, "the proof the MDM assigned the callsign should survive into the certificate"
+    enrolled = client.enrol(URL, CALLSIGN, CHALLENGE)
+    assert enrolled.subject == f"CN={CALLSIGN}"
 
 
 def test_a_refusal_says_why(responder: TestClient) -> None:
     """A CertRep refusal is final, so the reason has to reach the operator rather than a retry"""
     _ = responder
-    _SigningRmapi.refuse = RmapiRefused("nobody planned that callsign")
+    _SigningRmapi.refuse = RmapiRefused("that name is taken")
     with pytest.raises(ScepError) as refused:
         client.enrol(URL, "NOBODY1", CHALLENGE)
     assert "failInfo" in str(refused.value)
@@ -163,18 +161,3 @@ def test_a_wrong_challenge_is_refused(responder: TestClient) -> None:
     _ = responder
     with pytest.raises(ScepError):
         client.enrol(URL, CALLSIGN, "not the configured challenge")
-
-
-def test_the_proof_goes_somewhere_other_than_the_common_name() -> None:
-    """RASENMAEHER reads it from any attribute but the common name, so it must not land there"""
-    subject = client.build_subject(CALLSIGN, f"{CALLSIGN}@{CODE}")
-    common_names = subject.get_attributes_for_oid(NameOID.COMMON_NAME)
-    assert [attribute.value for attribute in common_names] == [CALLSIGN]
-    others = [attribute.value for attribute in subject if attribute.oid != NameOID.COMMON_NAME]
-    assert others == [f"{CALLSIGN}@{CODE}"]
-
-
-def test_a_subject_without_a_code_carries_only_the_callsign() -> None:
-    """Planned enrolments made before codes were required still have to be expressible"""
-    subject = client.build_subject(CALLSIGN, None)
-    assert len(list(subject)) == 1

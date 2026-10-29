@@ -76,7 +76,7 @@ async def test_success(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 401, 403, 409])
 async def test_refusals_are_final(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
-    """Not planned, already taken, not ours to complete: the device gains nothing by asking again"""
+    """Closed, already taken, not ours to enrol: the device gains nothing by asking again"""
     client = _client(lambda request: httpx.Response(status, json={"detail": "no"}), monkeypatch)
     with pytest.raises(RmapiRefused):
         await client.complete_enrollment("OTTER1", "csr")
@@ -175,7 +175,7 @@ async def test_a_redirect_is_an_outage_not_a_verdict(monkeypatch: pytest.MonkeyP
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [401, 403, 409])
 async def test_rasenmaeher_own_refusals_stay_final(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
-    """Not planned, not ours, already taken: these are verdicts and must not become retries"""
+    """Closed, not ours, already taken: these are verdicts and must not become retries"""
     client = _client(lambda request: httpx.Response(status, json={"detail": "no"}), monkeypatch)
     with pytest.raises(RmapiRefused):
         await client.complete_enrollment("OTTER1", "csr")

@@ -243,7 +243,7 @@ def test_the_link_app_is_offered_alongside_the_others(monkeypatch: pytest.Monkey
 
 
 def test_the_certificate_template_is_stated_before_anything_else(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Its subject carries the proof that the MDM assigned this device this callsign
+    """Its subject names the device, which becomes its callsign
 
     So it is configuration that gets reviewed and deployed, not something typed into a console.
     """

@@ -1,6 +1,6 @@
 """Talking to RASENMAEHER
 
-One call, to one endpoint that already exists: complete a device enrolment an admin planned. We
+One call, to one endpoint that already exists: enrol a device under the name its MDM gave it. We
 authenticate with our own client certificate from the deployment CA, exactly as every other
 container in the deployment does. We hold no token, no invite code and no admin identity, and the
 only thing our CN is permitted to do is this.
@@ -22,9 +22,9 @@ LOGGER = logging.getLogger(__name__)
 class RmapiRefused(Exception):
     """RASENMAEHER said no, and meant it
 
-    The device is asking for something it will not get by asking again: the callsign was never
-    planned, or somebody else has it, or the request does not match. Tell the device so, rather
-    than leaving the MDM to retry for ever.
+    The device is asking for something it will not get by asking again: enrolment is closed, the
+    name is not one a callsign may be, or somebody else has it. Tell the device so, rather than
+    leaving the MDM to retry for ever.
     """
 
 
@@ -83,7 +83,7 @@ class Client:
         request_id: str | None = None,
         forwarded_for: str | None = None,
     ) -> IssuedCertificate:
-        """Complete the enrolment an admin planned for this callsign, with the device's own request
+        """Enrol the device under the name its MDM gave it, with the device's own request
 
         `challenge` is the device's, passed on for RASENMAEHER to check. `request_id` and
         `forwarded_for` are passed through so RASENMAEHER's audit line can be joined to ours, and
@@ -110,12 +110,12 @@ class Client:
             # front of it. The mTLS location answers a failed client-certificate check with a 302
             # to an error page, which is exactly what a freshly issued certificate gets while the
             # OCSP responder still has not heard of it. Treating that as a refusal would hand the
-            # device a final answer and spend its callsign over a few minutes of warm-up.
+            # device a final answer over a few minutes of warm-up.
             LOGGER.warning("RASENMAEHER answered %s", response.status_code)
             raise RmapiUnavailable(f"HTTP {response.status_code}")
         if response.status_code != 200:
-            # 401/403 is the ordinary answer for a callsign nobody planned, and for us not being
-            # a recognised agent. Deliberately one shape either way.
+            # 401/403 is the ordinary answer for enrolment being closed or the name taken, and for
+            # us not being a recognised agent. Deliberately one shape either way.
             LOGGER.warning("RASENMAEHER refused %s: HTTP %s", callsign, response.status_code)
             raise RmapiRefused(f"HTTP {response.status_code}")
 

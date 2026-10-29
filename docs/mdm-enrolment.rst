@@ -21,11 +21,11 @@ server does, which is why the endpoint has to be publicly reachable and why requ
 the MDM's addresses rather than the device's.
 
 **rmscep** speaks SCEP and nothing else. It holds no roster, decides no policy, and knows no
-product's package names. It unwraps the request and asks RASENMAEHER to complete an enrolment an
-admin already planned.
+product's package names. It unwraps the request and asks RASENMAEHER to enrol the device under the
+name its MDM gave it.
 
-**RASENMAEHER** owns the decision. It is the certificate authority, it holds the roster, and it is
-the only component that can say yes.
+**RASENMAEHER** owns the decision. It is the certificate authority, it knows whether enrolment is
+open and whether a name is free, and it is the only component that can say yes.
 
 Two containers, and why
 =======================
@@ -47,79 +47,64 @@ owns has no business also being an internet facing parser.
 What authorises what
 ====================
 
-Four things gate an enrolment, and it is worth being precise about which of them are real.
+Three things gate an enrolment, and it is worth being precise about what each is worth.
 
-**The SCEP challenge is not a secret.** It sits in the MDM's configuration and travels in every
-device's request. It keeps noise off the endpoint and nothing more. Any design that relies on it
-being confidential is wrong. RASENMAEHER makes it and checks it, and refuses every device until an
-admin opens enrolment on the MDM page; the window closes itself.
+**The enrolment window** is the real gate. RASENMAEHER refuses every device until an admin opens
+enrolment on the MDM page, and the window closes itself. Keep it open only while phones are being
+enrolled.
 
-**The agent certificate** says only "this caller may complete a device enrolment an admin already
-planned". Its CN is listed in RASENMAEHER's ``RM_MDM_AGENT_CNS``. It deliberately is **not** a
+**The SCEP challenge** keeps noise off the endpoint. It sits in the MDM's configuration and every
+enrolled device carries it, so it cannot be treated as confidential: while the window is open,
+whoever holds it can enrol a device under any free name. That is the price of letting the MDM
+decide identity, and the reason the window is short.
+
+**The agent certificate** says only "this caller may enrol a device while enrolment is open". Its CN is listed in RASENMAEHER's ``RM_MDM_AGENT_CNS``. It deliberately is **not** a
 kraftwerk product CN: a product CN skips role checks, can have any request signed whatever its
 subject, and cannot be revoked at the edge, which is far more than this needs. The CN is also
 reserved as a callsign, so nobody can be issued a certificate that impersonates the agent.
-
-**The planned callsign** is the roster. An admin plans it ahead of time; the agent can only
-complete what was planned, never create one.
-
-**The per-enrolment code** is what binds a device to its callsign. This is the gate that matters,
-because the endpoint is public and the callsign is a short human-chosen string that an attacker can
-guess. RASENMAEHER already generates a random code on every planned row, and the MDM carries it
-into the request's subject alongside the callsign.
 
 What any MDM has to be able to do
 =================================
 
 Nothing in the enrolment path is specific to a product. The responder speaks RFC 8894 and knows
 nothing about any MDM: there is not one product name in the request path. So the question "will
-this MDM work" has four answers and no more.
+this MDM work" has three answers and no more.
 
 1. **Point a custom SCEP authority at** ``https://<domain>/scep`` **with the deployment's
-   challenge.** The challenge is a nuisance filter, not a secret, and it is the same for every
-   device. Most MDMs fetch ``GetCACert`` when the authority is saved, so a wrong URL fails at once.
+   challenge.** Most MDMs fetch ``GetCACert`` when the authority is saved, so a wrong URL fails at
+   once.
 
-2. **Produce the subject below.** Every MDM words its variables differently; what has to be true is
-   that it can put an operator-set, per-device string into a certificate subject.
+2. **Name the device in the common name** with a per-device value it knows when the device
+   enrols. Every MDM words its variables differently.
 
 3. **Ask for an RSA key of 2048 bits or more.** We advertise ``POSTPKIOperation SHA-256 AES
    SCEPStandard`` and accept ``PKCSReq`` only. Elliptic curve keys cannot do the key transport SCEP
-   defines, so a profile asking for one is refused with ``badAlg`` before anything is issued; the
-   callsign stays usable once the profile is fixed.
-
-4. **Put the proof in one subject attribute only.** A request with two attributes holding an
-   ``@`` is refused, so one request is one guess at a code.
+   defines, so a profile asking for one is refused with ``badAlg`` before anything is issued.
 
 Pushing applications and device policy is a separate question and it is **not** portable: that
 needs the MDM's own API, so it needs a driver. ``mdm-apply --mdm manual`` prints what to configure
 by hand for an MDM we have no driver for, which is what "works with any MDM" honestly means.
 
-The subject the MDM must produce
-================================
+The name the MDM gives a device
+===============================
 
-The callsign goes in the common name. The string ``<callsign>@<code>`` goes in **any other**
-attribute::
+The MDM decides who a device is. The common name of its request becomes its callsign, in Deploy
+App and in every product::
 
-    CN=OTTER1                    the callsign, and the user's identity from then on
-    OU=OTTER1@7F3A9C2B           the proof the MDM was told to give this device that callsign
+    CN=R58N12ABCDE               the callsign, and the user's identity from then on
 
-RASENMAEHER searches every subject attribute except the common name for the code, so which one the
-MDM renders it into is the MDM's business rather than ours. The common name is excluded on purpose:
-accepting it there would let a caller who guessed the callsign satisfy the check with the guess.
+The name has to be 3-30 letters A-Z or digits, the rule people's callsigns follow, because every
+product takes it as a user name. A name somebody already has is refused, unless it is the same
+device asking again with the same key. Other subject attributes are left to the MDM, and the
+signer copies the subject into the certificate as it is.
 
-A caller who guesses ``OTTER1`` has no code to put anywhere, is refused before anything is claimed,
-and so cannot spend a callsign either.
+Pick a value the MDM knows the moment a device enrols, so nobody names hosts by hand. One MDM's way
+of writing it, as an example of the shape rather than as the syntax to copy::
 
-One MDM's way of writing it, as an example of the shape rather than as the syntax to copy::
+    CN=$FLEET_VAR_HOST_HARDWARE_SERIAL
 
-    CN=$FLEET_VAR_HOST_END_USER_IDP_USERNAME_LOCAL_PART   →  OTTER1
-    OU=$FLEET_VAR_HOST_END_USER_IDP_USERNAME              →  OTTER1@7F3A9C2B
-
-**The binding is the part that does not generalise.** Some MDM field has to hold
-``<callsign>@<code>`` for that device, and it has to hold it *before* the device enrols. Which
-field it is differs by product, and a few expose one only per user rather than per device, which
-changes the operator's workflow rather than just the syntax. This is the first thing to check when
-evaluating an MDM, and it is not something code can paper over.
+Check that your MDM actually has the value for your kind of enrolment before relying on it: a
+personally owned phone may not report its serial number.
 
 A subject that does not resolve is the failure to expect, and it is silent: the MDM sends no
 request at all, so nothing reaches our logs and only the MDM can say why. ``rmscep selftest`` exists
@@ -151,14 +136,12 @@ Three facts about managed Android pull against each other. Each was learned by g
 3. **A policy rewritten while applications are installing stops them installing.** It never settles
    long enough for the store to finish.
 
-So, per device: apply the template once, plan the callsign, enrol, **leave it alone** until the
-applications have arrived, then set the per-host field, then force the policy. Between enrolling
-and setting the field the device will ask for a certificate with an empty subject and be refused.
-That is harmless: the refusal happens before RASENMAEHER is asked, so no callsign is spent.
-
-A device that has already enrolled cannot be rescued by repeating any of this. Give it a fresh
-callsign and enrol it again, because the one it holds is spent and its new key will not match the
-certificate that callsign already has.
+So: apply the template before any device joins, open enrolment, enrol, and **leave the devices
+alone** until the applications have arrived. With a name the MDM knows at enrolment, the first
+certificate request already succeeds and nothing is left to do per device. A subject built from a
+field somebody fills in by hand after enrolment brings the old trap back: the first request goes
+out with an empty name and is refused, and the device gets a certificate only when the profile is
+sent again.
 
 Operating it
 ============
@@ -173,7 +156,8 @@ Operating it
     rmscep selftest CALLSIGN       # enrol as a device would, to prove the responder on its own
     rmscep healthcheck             # RA identity, CA chain, and the client certificate's expiry
 
-``selftest`` spends a planned enrolment, so plan one for the purpose rather than using a person's.
+``selftest`` creates a user under the name it is given, so use a throwaway name and remove the
+user afterwards.
 It is the only thing that separates "the responder is wrong" from "the MDM never asked", which from
 the outside look identical and are answered in completely different places.
 
@@ -182,8 +166,9 @@ Failure, and how it is answered
 
 A refusal and an outage are different answers, and telling them apart matters more than it sounds.
 
-A **refusal** is final. Not planned, already taken, wrong code: the device gains nothing by asking
-again, so it gets a signed failure and the operator plans another callsign.
+A **refusal** is final. Enrolment closed, name taken, or not a name a callsign may be: the device
+gains nothing by asking again, so it gets a signed failure, and the operator opens enrolment or
+changes the name the MDM gives it.
 
 An **outage** is not a verdict on the device. RASENMAEHER restarting, or the front proxy rejecting
 our client certificate while the revocation responder has not yet heard of it, are transient. Those
@@ -197,16 +182,13 @@ public endpoint, and an uncaught exception there is a 500 with a traceback.
 Known gaps
 ==========
 
-**Guessing is not bounded.** The code is checked, not consumed, so wrong guesses are free and
-unlimited. Eight characters is ample against one attacker chasing one callsign, but an attacker who
-will take any of a few hundred pending rows, from many addresses, is inside a couple of months. The
-fix is a wrong-attempt counter on the row rather than a longer code: a bound per row makes length
-irrelevant. Rotating a code costs no callsign, so recovery is cheap.
+**The challenge is the gate while the window is open.** Any enrolled device, and anyone who can
+read the MDM's configuration, holds it, and with it can enrol a device under any free name until
+the window closes. Keep windows short and check the device list after each one.
 
-**The code lands in the issued certificate.** The signer copies the request's subject verbatim, so
-the certificate carries ``OU=<callsign>@<code>`` for its lifetime. It is inert by then, but it is a
-spent secret in a durable artefact. Removing it means letting the CA name the certificate rather
-than accepting the request's subject.
+**A reset device cannot take its name back.** Its new key does not match the certificate the name
+already has, and removing that user spends the name for good. An MDM that names devices by serial
+number therefore needs a different name for a reset phone.
 
 **Per-user product data is not delivered.** Applications install but come up unconfigured. The
 declaration that would carry it is a later phase.

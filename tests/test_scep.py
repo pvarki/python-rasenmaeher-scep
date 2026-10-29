@@ -198,14 +198,10 @@ def test_elliptic_curve_device_key(ra_identity: RaIdentity) -> None:
     assert isinstance(request.public_key(), ec.EllipticCurvePublicKey)
 
 
-def test_one_request_carries_one_enrolment_proof(ra_identity: RaIdentity) -> None:
-    """A guess per attribute would test hundreds of codes in one request"""
-    proof = [(NameOID.ORGANIZATIONAL_UNIT_NAME, "OTTER7@7F3A9C2B")]
-    assert parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER7", subject_extra=proof), ra_identity)
-
-    batched = proof + [(NameOID.ORGANIZATIONAL_UNIT_NAME, "OTTER7@AAAAAAAA")]
-    with pytest.raises(ScepError):
-        parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER7", subject_extra=batched), ra_identity)
+def test_a_subject_packed_with_attributes_is_refused(ra_identity: RaIdentity) -> None:
+    """A device subject is a name and a few fields an MDM template adds, not dozens"""
+    unit = [(NameOID.ORGANIZATIONAL_UNIT_NAME, "Devices")]
+    assert parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER7", subject_extra=unit), ra_identity)
 
     padded = [(NameOID.ORGANIZATIONAL_UNIT_NAME, f"unit{n}") for n in range(8)]
     with pytest.raises(ScepError):

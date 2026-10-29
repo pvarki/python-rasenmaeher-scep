@@ -30,8 +30,7 @@ def _a_template() -> MdmTemplate:
 def test_it_states_the_subject_convention_rather_than_one_mdm_s_syntax() -> None:
     """Any MDM can satisfy the contract; none of them spell the variables the same way"""
     report = ManualMdm(URL).describe("a-group", _a_template())
-    assert "<callsign>@<approval code>" in report
-    assert "common name" in report
+    assert "common name becomes the device's callsign" in report
     assert "Yours will differ" in report
 
 

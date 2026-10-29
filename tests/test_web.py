@@ -176,8 +176,8 @@ def test_a_request_without_a_challenge_is_refused_here(client: TestClient, tmp_p
 
 
 def test_a_refusal_is_final_and_signed(client: TestClient, tmp_path: Path) -> None:
-    """Not planned, already taken, not ours: the device gains nothing by asking again"""
-    _StubRmapi.raises = RmapiRefused("not planned")
+    """Closed, already taken, not ours: the device gains nothing by asking again"""
+    _StubRmapi.raises = RmapiRefused("taken")
     ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
     body = build_pkcs_req(ra, ISSUED_CALLSIGN)
     response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)

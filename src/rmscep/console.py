@@ -336,23 +336,21 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
 @click.argument("callsign")
 @click.option("--url", default=None, help="The responder's SCEP URL (default: https://<RMSCEP_DOMAIN>/scep)")
 @click.option("--challenge", default=None, help="The deployment challenge (default: RMSCEP_CHALLENGE)")
-@click.option("--code", default=None, help="The enrolment's approval code, which proves the callsign was assigned")
 @click.option("--insecure", is_flag=True, help="Skip TLS verification, for a deployment using a private CA")
 def selftest(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ctx: click.Context,
     callsign: str,
     url: str | None,
     challenge: str | None,
-    code: str | None,
     insecure: bool,
 ) -> None:
     """Enrol one callsign the way a device would, and say what came back
 
-    This spends a planned enrolment: the callsign it succeeds with is claimed and cannot be used
-    again. Plan one for the purpose rather than testing with a person's.
+    This creates a user: the callsign it succeeds with is taken and cannot be used again. Use a
+    throwaway name, never a person's, and remove the user afterwards.
 
     Use it to tell the two failures apart. If this succeeds, the responder, the challenge and the
-    planned callsign are all good, and an MDM that still cannot enrol is failing its half of the
+    open enrolment window are all good, and an MDM that still cannot enrol is failing its half of the
     contract -- most often by sending no request at all, because its subject template did not
     resolve. Nothing here knows about any MDM.
     """
@@ -381,7 +379,6 @@ def selftest(  # pylint: disable=too-many-arguments,too-many-positional-argument
             the_url,
             callsign,
             the_challenge,
-            proof=f"{callsign}@{code}" if code else None,
             verify=verify,
         )
     except ScepError as exc:

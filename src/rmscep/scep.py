@@ -59,8 +59,8 @@ CAPS = "POSTPKIOperation\nSHA-256\nAES\nSCEPStandard\n"
 # device we want to spend a private key operation on.
 MAX_REQUEST_BYTES = 16 * 1024
 
-# A device subject is a callsign and the enrolment proof, plus whatever few fields an MDM template
-# adds. Many more is somebody packing guesses.
+# A device subject is the name its MDM gave it, plus whatever few fields an MDM template adds.
+# Many more is not a device.
 MAX_SUBJECT_ATTRIBUTES = 8
 
 
@@ -387,16 +387,12 @@ def parse_pkcs_req(body: bytes, ra: RaIdentity) -> ScepRequest:
     except Exception as exc:
         raise ScepError(f"could not read the request subject: {exc}") from exc
     if len(common_names) != 1 or not str(common_names[0].value).strip():
-        # An MDM whose subject template has not been filled in yet sends an empty CN. Refusing here
-        # means we never ask RASENMAEHER about a callsign nobody could have planned.
+        # An MDM whose subject template did not resolve sends an empty CN. Refusing here means we
+        # never ask RASENMAEHER to enrol a device under no name.
         raise ScepError("the certificate request has no single usable common name", FAIL_BAD_IDENTITY)
     subject = list(csr.subject)
     if len(subject) > MAX_SUBJECT_ATTRIBUTES:
         raise ScepError("the certificate request subject has too many attributes", FAIL_BAD_REQUEST)
-    if sum(1 for attribute in subject if "@" in str(attribute.value)) > 1:
-        # RASENMAEHER takes the enrolment proof from one attribute only; more is a request testing
-        # several codes at once.
-        raise ScepError("the certificate request carries more than one enrolment proof", FAIL_BAD_REQUEST)
 
     challenge: str | None = None
     try:
