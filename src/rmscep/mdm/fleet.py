@@ -275,7 +275,8 @@ class FleetMdm:
         query = urlencode({"team_id": team, "available_for_install": "true"})
         for existing in self._call("GET", f"/api/latest/fleet/software/titles?{query}").get("software_titles", []):
             package = (existing.get("app_store_app") or {}).get("app_store_id", "")
-            if package.startswith("com.google.enterprise.webapp.") and existing.get("name") == title:
+            named = title in (existing.get("display_name"), existing.get("name"))
+            if package.startswith("com.google.enterprise.webapp.") and named:
                 return str(package)
         return ""
 
@@ -428,6 +429,17 @@ class FleetMdm:
             preinstall.append(link)
 
         assigned = self.assign_apps(team, packages, preinstall)
+        if template.link_app:
+            # Fleet lists a new web app under its package name until a device reports it, and the
+            # lookup that keeps a re-run from publishing another permanent app goes by title.
+            self._call(
+                "PATCH",
+                f"/api/latest/fleet/software/titles/{assigned[link]}/app_store_app",
+                {
+                    "team_id": team,
+                    "display_name": self._published_title(template.link_app.title, template.link_app.url),
+                },
+            )
         for app in template.apps:
             if app.config:
                 self.set_app_config(team, app.package, app.config)

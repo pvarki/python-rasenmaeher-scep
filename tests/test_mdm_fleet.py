@@ -113,6 +113,9 @@ class _Fleet:
             title_match = re.search(r'name="title"\r?\n\r?\n([^\r\n]+)', body)
             wanted = url_match.group(1) if url_match else ""
             asked = title_match.group(1) if title_match else ""
+            if len(asked) >= 30:
+                # Google refuses a web app title of 30 characters or more, as a bare 400.
+                return httpx.Response(400, json={"message": "Couldn't create. Please check the provided data"})
             if any(a["title"] == asked for a in self.web_apps):
                 # Fleet refuses a name already published to the enterprise, whatever team it is
                 # in and even if its team is gone. Publishing cannot be undone.
@@ -123,16 +126,23 @@ class _Fleet:
                 {"app_store_id": pkg, "url": wanted, "title": title_match.group(1) if title_match else ""}
             )
             return httpx.Response(200, json={"app_store_id": pkg})
-        if path.endswith("/software/app_store_apps"):
-            # This is what puts an app in a team, and so what a later lookup can find. The name
-            # comes from the publish, because that is where Fleet got it.
+        if path.endswith("/app_store_app") and request.method == "PATCH":
             body = json.loads(request.read())
-            published = [a for a in self.web_apps if a["app_store_id"] == body["app_store_id"]]
+            title_id = int(path.split("/")[-2])
+            for title in self.titles:
+                if title["id"] == title_id and "display_name" in body:
+                    title["display_name"] = body["display_name"]
+            return httpx.Response(200, json={"app_store_app": {}})
+        if path.endswith("/software/app_store_apps"):
+            # This is what puts an app in a team. A new web app is listed under its package name,
+            # not its title, until a device reports it: seen on the real Fleet.
+            body = json.loads(request.read())
             self._next_id += 1
             self.titles.append(
                 {
                     "id": self._next_id,
-                    "name": published[0]["title"] if published else "",
+                    "name": body["app_store_id"],
+                    "display_name": "",
                     "team_id": body.get("team_id"),
                     "app_store_app": {"app_store_id": body["app_store_id"]},
                 }
@@ -411,7 +421,7 @@ def test_applying_twice_publishes_one_web_app(monkeypatch: pytest.MonkeyPatch) -
     mdm.apply("rmscep", template)
 
     assert len(fleet.web_apps) == 1, f"the re-run must not publish again, got {[a['title'] for a in fleet.web_apps]}"
-    launchers = [t for t in fleet.titles if t["name"].startswith("Deploy App")]
+    launchers = [t for t in fleet.titles if t["display_name"].startswith("Deploy App")]
     assert len(launchers) == 1, "the team must end up with one launcher, not one per run"
 
 
