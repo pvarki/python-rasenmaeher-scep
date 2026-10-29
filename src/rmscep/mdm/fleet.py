@@ -220,15 +220,17 @@ class FleetMdm:
                 content_type="image/png",
             )
         except FleetError as exc:
-            # A conflict means the name is already published somewhere in the enterprise: either
-            # it was published while we looked, or it belongs to a team that has since been
-            # deleted and recreated -- a web app outlives the team it was assigned to, because
-            # Fleet cannot delete one. Searching every team is safe now that the title carries
-            # the host: a name can only collide with the same deployment. It was not safe when
-            # the title was a bare "Deploy App", and that is what pointed devices at a dead host.
+            # A conflict means the name is already published to the enterprise. Re-read the team,
+            # because publishing is asynchronous and the lookup above can lose that race.
+            #
+            # There is nothing else to try. Checked against Fleet 4.90: a web app whose team was
+            # deleted appears in no listing at all -- not unscoped, not under team_id=0 -- while
+            # remaining published, because a web app cannot be deleted. So a recreated team
+            # cannot get its launcher back and the name stays spent. Say so rather than retrying
+            # somewhere it provably is not.
             if "409" not in str(exc) and "already exists" not in str(exc).lower():
                 raise
-            found = self._link_app_in_team(team, title) or self._link_app_anywhere(title)
+            found = self._link_app_in_team(team, title)
             if not found:
                 raise FleetError(
                     f"the MDM already has a web app named {title!r} but will not show it. A web app cannot be "
@@ -254,21 +256,6 @@ class FleetMdm:
         """
         host = urlparse(url).hostname or ""
         return f"{title} ({host})" if host else title
-
-    def _link_app_anywhere(self, title: str) -> str:
-        """The published web app of that name, not scoped to a team, or empty
-
-        Only for the conflict path. The title carries the host, so a match anywhere is this
-        deployment's own app -- typically one whose team was deleted and recreated, which leaves
-        the app published because Fleet cannot delete a web app. Asked without a team_id rather
-        than team by team, so that an app belonging to no team is still found.
-        """
-        query = urlencode({"available_for_install": "true"})
-        for existing in self._call("GET", f"/api/latest/fleet/software/titles?{query}").get("software_titles", []):
-            package = (existing.get("app_store_app") or {}).get("app_store_id", "")
-            if package.startswith("com.google.enterprise.webapp.") and existing.get("name") == title:
-                return str(package)
-        return ""
 
     def _link_app_in_team(self, team: int, title: str) -> str:
         """This team's published web app of that name, or empty if it has none
