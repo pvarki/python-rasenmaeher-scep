@@ -9,7 +9,7 @@ import json
 import logging
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -189,19 +189,27 @@ class FleetMdm:
     def ensure_link_app(self, team: int, title: str, url: str) -> str:
         """A managed web app, so the deployment has an icon on the launcher
 
-        Stated for the URL THIS deployment serves, every time. Google derives the package name
-        from the url, so asking twice for one url yields one app, and a deployment that has moved
-        yields a new one that actually points at it.
+        Looked up before publishing, because publishing twice does not yield one app. Google was
+        expected to derive the package name from the url and so dedupe a repeat of the same url;
+        it does not. One url published twice gave two package names, so every re-run left another
+        launcher on the team and another permanent app in the enterprise, Fleet offering no way
+        to delete one.
 
-        Deliberately not matched by title. Fleet exposes no way to read, change or delete a web
-        app's url, so a title match says nothing about where the icon goes: a deployment that
-        moved would keep the previous deployment's app and hand every device a link to a host
-        that no longer exists. That was the bug; the icon pointed at a decommissioned server
-        while every other part of the apply was correct.
+        So the url goes in the published title, and the title is the identity. Fleet never hands
+        a web app's url back, and the team does not identify a deployment either -- the original
+        bug was a new deployment reusing the team name of the one it replaced, finding "Deploy
+        App" already there, and handing every device an icon for the decommissioned host. Naming
+        the host makes a re-run match and a move not match, which is exactly the distinction we
+        cannot otherwise draw.
 
         The icon is required rather than decorative -- without one Google never publishes the app
         and every device reports the install as NOT_FOUND.
         """
+        title = self._published_title(title, url)
+        published = self._link_app_in_team(team, title)
+        if published:
+            LOGGER.info("Launcher web app %s already published to team %s, reusing it", published, team)
+            return published
         try:
             created = self._upload(
                 "/api/latest/fleet/software/web_apps",
@@ -212,12 +220,15 @@ class FleetMdm:
                 content_type="image/png",
             )
         except FleetError as exc:
-            # A conflict means this exact url is already published, because the package name is
-            # the url. Reuse it, but only then -- never on a bare title match.
+            # Publishing is asynchronous, so a lookup can miss an app that a moment later makes
+            # this a conflict. Re-read the team rather than give up.
             if "409" not in str(exc) and "already exists" not in str(exc).lower():
                 raise
-            LOGGER.info("The launcher web app for %s is already published, reusing it", url)
-            return self._link_app_by_title(title)
+            LOGGER.info("The launcher web app %r was published while we looked, reusing it", title)
+            racer = self._link_app_in_team(team, title)
+            if not racer:
+                raise FleetError(f"the MDM refused to publish the web app {title!r} and does not list one") from exc
+            return racer
 
         package = str(created.get("app_store_id") or created.get("package_name") or "")
         if not package:
@@ -225,15 +236,28 @@ class FleetMdm:
         LOGGER.info("Launcher web app %s points at %s", package, url)
         return package
 
-    def _link_app_by_title(self, title: str) -> str:
-        """The published app of that name, for the conflict path only"""
-        for team_row in self._call("GET", "/api/latest/fleet/teams").get("teams", []):
-            query = urlencode({"team_id": team_row["id"], "available_for_install": "true"})
-            for existing in self._call("GET", f"/api/latest/fleet/software/titles?{query}").get("software_titles", []):
-                package = (existing.get("app_store_app") or {}).get("app_store_id", "")
-                if package.startswith("com.google.enterprise.webapp.") and existing.get("name") == title:
-                    return str(package)
-        raise FleetError(f"the MDM refused to publish the web app {title!r} and does not list one")
+    @staticmethod
+    def _published_title(title: str, url: str) -> str:
+        """The title this deployment publishes under, carrying the host it serves
+
+        This is what the launcher icon reads on the device, so it is the deployment's name and
+        not an identifier: one instance per unit means the host is the useful half of it.
+        """
+        host = urlparse(url).hostname or ""
+        return f"{title} ({host})" if host else title
+
+    def _link_app_in_team(self, team: int, title: str) -> str:
+        """This team's published web app of that name, or empty if it has none
+
+        Scoped to the one team on purpose. Searching every team returns another deployment's app,
+        whose url points at another deployment and cannot be read to find that out.
+        """
+        query = urlencode({"team_id": team, "available_for_install": "true"})
+        for existing in self._call("GET", f"/api/latest/fleet/software/titles?{query}").get("software_titles", []):
+            package = (existing.get("app_store_app") or {}).get("app_store_id", "")
+            if package.startswith("com.google.enterprise.webapp.") and existing.get("name") == title:
+                return str(package)
+        return ""
 
     def ensure_authority(self, name: str, scep_url: str, challenge: str) -> int:
         """The SCEP CA this deployment is, created if the MDM does not have it yet

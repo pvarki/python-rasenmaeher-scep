@@ -5,7 +5,6 @@ installs, and an unchanged policy must not be re-uploaded, because a policy rewr
 pass never settles long enough for the device to finish installing anything.
 """
 
-import hashlib
 import json
 import re
 from typing import Any
@@ -100,31 +99,39 @@ class _Fleet:
         if path == "/api/latest/fleet/teams" and request.method == "GET":
             return httpx.Response(200, json={"teams": [{"id": 7, "name": "rmscep"}]})
         if path.endswith("/software/titles"):
-            return httpx.Response(200, json={"software_titles": list(self.titles)})
+            # Fleet scopes the listing to one team. A stub that ignored team_id would let a
+            # lookup find another team's app and call that a pass.
+            wanted_team = request.url.params.get("team_id")
+            listed = [t for t in self.titles if wanted_team is None or str(t.get("team_id")) == str(wanted_team)]
+            return httpx.Response(200, json={"software_titles": listed})
         if path.endswith("/software/web_apps"):
-            # Google derives the package name from the url, so model exactly that: a different
-            # url is a different app, and the same url is the same app.
+            # Publishing the SAME url twice yields TWO package names: observed against the real
+            # Fleet, where one url gave x023e... and then xb017.... Google does not dedupe by
+            # url, which is what makes every re-run leave a permanent orphan behind.
             body = request.content.decode("utf-8", "replace")
             url_match = re.search(r'name="url"\r?\n\r?\n([^\r\n]+)', body)
-            wanted = url_match.group(1) if url_match else ""
-            pkg = "com.google.enterprise.webapp." + hashlib.sha1(wanted.encode()).hexdigest()[:16]
             title_match = re.search(r'name="title"\r?\n\r?\n([^\r\n]+)', body)
-            self.web_apps.append({"app_store_id": pkg, "url": wanted})
-            # Fleet lists a published web app among the team's software titles, which is what a
-            # lookup by title would find. Without this the stub cannot show that reuse is wrong.
+            wanted = url_match.group(1) if url_match else ""
+            self._next_id += 1
+            pkg = f"com.google.enterprise.webapp.x{self._next_id:08x}"
+            self.web_apps.append(
+                {"app_store_id": pkg, "url": wanted, "title": title_match.group(1) if title_match else ""}
+            )
+            return httpx.Response(200, json={"app_store_id": pkg})
+        if path.endswith("/software/app_store_apps"):
+            # This is what puts an app in a team, and so what a later lookup can find. The name
+            # comes from the publish, because that is where Fleet got it.
+            body = json.loads(request.read())
+            published = [a for a in self.web_apps if a["app_store_id"] == body["app_store_id"]]
             self._next_id += 1
             self.titles.append(
                 {
                     "id": self._next_id,
-                    "name": title_match.group(1) if title_match else "",
-                    "app_store_app": {"app_store_id": pkg},
+                    "name": published[0]["title"] if published else "",
+                    "team_id": body.get("team_id"),
+                    "app_store_app": {"app_store_id": body["app_store_id"]},
                 }
             )
-            return httpx.Response(200, json={"app_store_id": pkg})
-        if path.endswith("/software/app_store_apps"):
-            body = json.loads(request.read())
-            self._next_id += 1
-            self.titles.append({"id": self._next_id, "app_store_app": {"app_store_id": body["app_store_id"]}})
             return httpx.Response(200, json={"software_title_id": self._next_id})
         if path.endswith("/configuration_profiles"):
             if request.method == "GET":
@@ -383,13 +390,34 @@ def test_repointing_does_not_try_to_rename(monkeypatch: pytest.MonkeyPatch) -> N
     assert fleet.authorities[0]["url"] == "https://moved.test/scep", "the repoint must have gone through"
 
 
+def test_applying_twice_publishes_one_web_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A re-run reuses the launcher instead of leaving another permanent one behind
+
+    Google does not dedupe by url: the same url published twice came back as two package names,
+    so every mdm-apply added another launcher to the team. Fleet cannot delete a web app, so each
+    one is permanent, and the third publish of a name is refused outright.
+    """
+    fleet = _Fleet()
+    template = MdmTemplate(
+        apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp(title="Deploy App", url="https://same.test/")
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", template)
+    mdm.apply("rmscep", template)
+
+    assert len(fleet.web_apps) == 1, f"the re-run must not publish again, got {[a['title'] for a in fleet.web_apps]}"
+    launchers = [t for t in fleet.titles if t["name"].startswith("Deploy App")]
+    assert len(launchers) == 1, "the team must end up with one launcher, not one per run"
+
+
 def test_the_launcher_points_at_this_deployment_not_the_last_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The web app is identified by its url, never by its title
+    """The web app is identified by the host it serves, never by a bare title
 
     Fleet cannot read, change or delete a web app's url, so reusing one because the title matched
     kept a decommissioned deployment's link and handed every device an icon that opened a host
     which no longer existed. Everything else about the apply was correct, which is what made it
-    so quiet.
+    so quiet. The deployment that replaced it reused the team name too, so the team is no help:
+    the host in the title is what tells the two apart.
     """
     fleet = _Fleet()
     template = MdmTemplate(
