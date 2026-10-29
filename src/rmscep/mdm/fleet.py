@@ -27,6 +27,10 @@ class FleetError(RuntimeError):
     """Fleet refused, or answered something we cannot use"""
 
 
+#: Google refuses a managed web app title of 30 characters or more
+MAX_WEB_APP_TITLE = 29
+
+
 class FleetMdm:
     """What this feature needs an MDM to be able to do, in Fleet's words"""
 
@@ -249,13 +253,18 @@ class FleetMdm:
 
     @staticmethod
     def _published_title(title: str, url: str) -> str:
-        """The title this deployment publishes under, carrying the host it serves
+        """The title this deployment publishes under, carrying the deployment's name
 
         This is what the launcher icon reads on the device, so it is the deployment's name and
-        not an identifier: one instance per unit means the host is the useful half of it.
+        not an identifier: one instance per unit means the deployment is the useful half of it.
+        Its first DNS label, not the whole host, because Google refuses a web app title of 30
+        characters or more and a full host rarely fits.
         """
-        host = urlparse(url).hostname or ""
-        return f"{title} ({host})" if host else title
+        name = (urlparse(url).hostname or "").removeprefix("mtls.").split(".")[0]
+        room = MAX_WEB_APP_TITLE - len(title) - len(" ()")
+        if not name or room <= 0:
+            return title[:MAX_WEB_APP_TITLE]
+        return f"{title} ({name[:room]})"
 
     def _link_app_in_team(self, team: int, title: str) -> str:
         """This team's published web app of that name, or empty if it has none

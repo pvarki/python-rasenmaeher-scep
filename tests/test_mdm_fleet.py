@@ -438,7 +438,7 @@ def test_a_wiped_team_says_what_is_wrong_instead_of_just_409(monkeypatch: pytest
     with pytest.raises(FleetError) as caught:
         mdm.apply("rmscep", template)
     said = str(caught.value)
-    assert "Deploy App (same.test)" in said, f"it must name the title that is taken, said: {said}"
+    assert "Deploy App (same)" in said, f"it must name the title that is taken, said: {said}"
     assert "deleted" in said.lower() or "cannot be deleted" in said.lower(), f"it must say why: {said}"
     assert len(fleet.web_apps) == 1, "it must not have published a second app before failing"
 
@@ -468,3 +468,12 @@ def test_the_launcher_points_at_this_deployment_not_the_last_one(monkeypatch: py
 
     assert fleet.web_apps[-1]["url"] == "https://new.test/", "the moved deployment must publish its own url"
     assert second != first, "same title, different url: it must not reuse the old app"
+
+
+def test_the_launcher_title_names_the_deployment_and_fits() -> None:
+    """Google refuses a web app title of 30 characters or more, and a full host rarely fits"""
+    title = FleetMdm._published_title("Deploy App", "https://mtls.busy-phoenix.solution.dev.pvarki.fi/")
+    assert title == "Deploy App (busy-phoenix)"
+    long_name = FleetMdm._published_title("Deploy App", "https://mtls.thoughtful-hippopotamus.example.org/")
+    assert len(long_name) < 30
+    assert long_name.startswith("Deploy App (thoughtful")
