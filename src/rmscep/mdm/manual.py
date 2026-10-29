@@ -60,7 +60,7 @@ class ManualMdm:
             f"     name    {template.certificate.name}",
             f"     subject {template.certificate.subject}",
             "",
-            "   The common name becomes the device's callsign: 3-30 letters A-Z or digits, and not",
+            "   The common name becomes the device's callsign: 3-32 letters A-Z, digits or inner hyphens, and not",
             "   one somebody already has. The MDM decides it, so pick a per-device value the MDM",
             "   knows the moment a device enrols, such as its serial number.",
             "",

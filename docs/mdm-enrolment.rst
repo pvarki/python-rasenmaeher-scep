@@ -93,8 +93,9 @@ App and in every product::
 
     CN=R58N12ABCDE               the callsign, and the user's identity from then on
 
-The name has to be 3-30 letters A-Z or digits, the rule people's callsigns follow, because every
-product takes it as a user name. A name somebody already has is refused, unless it is the same
+The name has to be 3-32 letters A-Z, digits or hyphens, with no hyphen at either end, because every
+product takes it as a user name. That fits the enrollment-specific ID a work-profile phone reports in
+place of its serial number. A name somebody already has is refused, unless it is the same
 device asking again with the same key. Other subject attributes are left to the MDM, and the
 signer copies the subject into the certificate as it is.
 
