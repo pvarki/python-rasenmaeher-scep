@@ -46,6 +46,25 @@ def _a_certificate(common_name: str) -> str:
     return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
 
 
+def _certify(csrpem: str) -> str:
+    """What RASENMAEHER hands back: the request's key certified by a CA, with that CA appended"""
+    csr = x509.load_pem_x509_csr(csrpem.encode("utf-8"))
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
+    now = datetime.datetime.now(datetime.UTC)
+    leaf = (
+        x509.CertificateBuilder()
+        .subject_name(csr.subject)
+        .issuer_name(ca_name)
+        .public_key(csr.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .sign(ca_key, hashes.SHA256())
+    )
+    return leaf.public_bytes(serialization.Encoding.PEM).decode("utf-8") + _a_certificate("Test CA")
+
+
 class _StubRmapi:
     """Stands in for RASENMAEHER, which owns the challenge"""
 
@@ -56,13 +75,12 @@ class _StubRmapi:
         pass
 
     async def complete_enrollment(self, callsign: str, csrpem: str, **kwargs: Any) -> IssuedCertificate:
-        _ = csrpem
         _StubRmapi.seen = kwargs
         if _StubRmapi.raises is not None:
             raise _StubRmapi.raises
         if kwargs.get("challenge") != CHALLENGE:
             raise RmapiRefused("HTTP 403")
-        return IssuedCertificate(callsign=callsign, certificate=_a_certificate(callsign))
+        return IssuedCertificate(callsign=callsign, certificate=_certify(csrpem))
 
 
 @pytest.fixture

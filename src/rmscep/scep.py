@@ -419,9 +419,22 @@ def parse_pkcs_req(body: bytes, ra: RaIdentity) -> ScepRequest:
 
 
 def cert_rep(ra: RaIdentity, req: ScepRequest, issued_pem: str) -> bytes:
-    """A successful CertRep carrying the issued certificate"""
-    issued = x509.load_pem_x509_certificates(issued_pem.encode("utf-8"))
-    payload = _envelope_for(req.device_cert, _degenerate_certs_only(issued))
+    """A successful CertRep carrying the issued certificate, and only that
+
+    RASENMAEHER may append its CA chain, and DER sorts the set the certificates travel in, so a
+    client taking the first one (Fleet's Android agent does) would pair its key with a CA
+    certificate. Android then refuses to store it.
+    """
+    der, spki = serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    wanted = x509.load_pem_x509_csr(req.csr_pem.encode("utf-8")).public_key().public_bytes(der, spki)
+    issued = [
+        cert
+        for cert in x509.load_pem_x509_certificates(issued_pem.encode("utf-8"))
+        if cert.public_key().public_bytes(der, spki) == wanted
+    ]
+    if not issued:
+        raise ScepError("the issued certificate does not certify the requested key")
+    payload = _envelope_for(req.device_cert, _degenerate_certs_only(issued[:1]))
     attrs = _signed_attrs(payload, req.transaction_id, req.sender_nonce, STATUS_SUCCESS, None)
     return _wrap_signed(ra, payload, attrs)
 

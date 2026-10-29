@@ -251,10 +251,11 @@ def test_oversized_request_is_refused_before_any_crypto(ra_identity: RaIdentity)
 
 def test_responses_are_well_formed(ra_identity: RaIdentity) -> None:
     """Success, failure and GetCACert all have to be things a client can parse"""
-    body = build_pkcs_req(ra_identity, "OTTER6")
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    body = build_pkcs_req(ra_identity, "OTTER6", device_key=key)
     parsed = parse_pkcs_req(body, ra_identity)
 
-    issued = _self_signed(rsa.generate_private_key(public_exponent=65537, key_size=2048), "OTTER6")
+    issued = _self_signed(key, "OTTER6")
     issued_pem = issued.public_bytes(serialization.Encoding.PEM).decode("utf-8")
     success = cms.ContentInfo.load(cert_rep(ra_identity, parsed, issued_pem))
     assert success["content_type"].native == "signed_data"
@@ -267,6 +268,24 @@ def test_responses_are_well_formed(ra_identity: RaIdentity) -> None:
 
     cacert = cms.ContentInfo.load(ca_cert_response(ra_identity, [issued_pem.encode("utf-8")]))
     assert len(cacert["content"]["certificates"]) == 2
+
+
+def test_the_reply_carries_only_the_device_certificate(ra_identity: RaIdentity) -> None:
+    """RASENMAEHER appends its CA chain, and a client taking the first certificate would pair its
+    key with a CA certificate, which Android refuses to store"""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    parsed = parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER8", device_key=key), ra_identity)
+    leaf = _self_signed(key, "OTTER8")
+    ca = _self_signed(ec.generate_private_key(ec.SECP256R1()), "Some CA")
+    chain_pem = b"".join(c.public_bytes(serialization.Encoding.PEM) for c in (leaf, ca)).decode("utf-8")
+
+    reply = cms.ContentInfo.load(cert_rep(ra_identity, parsed, chain_pem))
+    enveloped = reply["content"]["encap_content_info"]["content"].native
+    certs_only = pkcs7.pkcs7_decrypt_der(enveloped, parsed.device_cert, key, [])
+    assert pkcs7.load_der_pkcs7_certificates(certs_only) == [leaf]
+
+    with pytest.raises(ScepError):
+        cert_rep(ra_identity, parsed, ca.public_bytes(serialization.Encoding.PEM).decode("utf-8"))
 
 
 def test_ra_identity_is_stable_and_rsa(tmp_path: Path) -> None:
