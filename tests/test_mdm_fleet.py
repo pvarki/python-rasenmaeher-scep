@@ -112,6 +112,11 @@ class _Fleet:
             url_match = re.search(r'name="url"\r?\n\r?\n([^\r\n]+)', body)
             title_match = re.search(r'name="title"\r?\n\r?\n([^\r\n]+)', body)
             wanted = url_match.group(1) if url_match else ""
+            asked = title_match.group(1) if title_match else ""
+            if any(a["title"] == asked for a in self.web_apps):
+                # Fleet refuses a name already published to the enterprise, whatever team it is
+                # in and even if its team is gone. Publishing cannot be undone.
+                return httpx.Response(409, json={"message": "Web app with this name already exists in this fleet"})
             self._next_id += 1
             pkg = f"com.google.enterprise.webapp.x{self._next_id:08x}"
             self.web_apps.append(
@@ -408,6 +413,34 @@ def test_applying_twice_publishes_one_web_app(monkeypatch: pytest.MonkeyPatch) -
     assert len(fleet.web_apps) == 1, f"the re-run must not publish again, got {[a['title'] for a in fleet.web_apps]}"
     launchers = [t for t in fleet.titles if t["name"].startswith("Deploy App")]
     assert len(launchers) == 1, "the team must end up with one launcher, not one per run"
+
+
+def test_a_wiped_team_says_what_is_wrong_instead_of_just_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name published to a team that no longer exists must fail legibly
+
+    A full fresh run deletes the team and makes it again. The web app outlives it, because Fleet
+    cannot delete one, so publishing the same name answers 409. Whether Fleet still lists an app
+    whose team is gone is not something this stub can decide, so the contract tested here is the
+    one that holds either way: when it cannot be found, the operator is told the name is taken
+    and what to do about it, rather than being handed a bare conflict.
+    """
+    fleet = _Fleet()
+    template = MdmTemplate(
+        apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp(title="Deploy App", url="https://same.test/")
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", template)
+    published = fleet.web_apps[-1]["app_store_id"]
+
+    # The team is deleted and recreated: its software titles go with it, the web app does not.
+    fleet.titles = [t for t in fleet.titles if (t.get("app_store_app") or {}).get("app_store_id") != published]
+
+    with pytest.raises(FleetError) as caught:
+        mdm.apply("rmscep", template)
+    said = str(caught.value)
+    assert "Deploy App (same.test)" in said, f"it must name the title that is taken, said: {said}"
+    assert "deleted" in said.lower() or "cannot be deleted" in said.lower(), f"it must say why: {said}"
+    assert len(fleet.web_apps) == 1, "it must not have published a second app before failing"
 
 
 def test_the_launcher_points_at_this_deployment_not_the_last_one(monkeypatch: pytest.MonkeyPatch) -> None:

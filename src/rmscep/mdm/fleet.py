@@ -220,15 +220,24 @@ class FleetMdm:
                 content_type="image/png",
             )
         except FleetError as exc:
-            # Publishing is asynchronous, so a lookup can miss an app that a moment later makes
-            # this a conflict. Re-read the team rather than give up.
+            # A conflict means the name is already published somewhere in the enterprise: either
+            # it was published while we looked, or it belongs to a team that has since been
+            # deleted and recreated -- a web app outlives the team it was assigned to, because
+            # Fleet cannot delete one. Searching every team is safe now that the title carries
+            # the host: a name can only collide with the same deployment. It was not safe when
+            # the title was a bare "Deploy App", and that is what pointed devices at a dead host.
             if "409" not in str(exc) and "already exists" not in str(exc).lower():
                 raise
-            LOGGER.info("The launcher web app %r was published while we looked, reusing it", title)
-            racer = self._link_app_in_team(team, title)
-            if not racer:
-                raise FleetError(f"the MDM refused to publish the web app {title!r} and does not list one") from exc
-            return racer
+            found = self._link_app_in_team(team, title) or self._link_app_anywhere(title)
+            if not found:
+                raise FleetError(
+                    f"the MDM already has a web app named {title!r} but will not show it. A web app cannot be "
+                    "deleted, and it outlives the team it was assigned to, so a team that was deleted and "
+                    "recreated leaves the name taken. Give this deployment a different launcher title, or a "
+                    "host of its own."
+                ) from exc
+            LOGGER.info("Launcher web app %s is already published as %r, reusing it", found, title)
+            return found
 
         package = str(created.get("app_store_id") or created.get("package_name") or "")
         if not package:
@@ -245,6 +254,21 @@ class FleetMdm:
         """
         host = urlparse(url).hostname or ""
         return f"{title} ({host})" if host else title
+
+    def _link_app_anywhere(self, title: str) -> str:
+        """The published web app of that name, not scoped to a team, or empty
+
+        Only for the conflict path. The title carries the host, so a match anywhere is this
+        deployment's own app -- typically one whose team was deleted and recreated, which leaves
+        the app published because Fleet cannot delete a web app. Asked without a team_id rather
+        than team by team, so that an app belonging to no team is still found.
+        """
+        query = urlencode({"available_for_install": "true"})
+        for existing in self._call("GET", f"/api/latest/fleet/software/titles?{query}").get("software_titles", []):
+            package = (existing.get("app_store_app") or {}).get("app_store_id", "")
+            if package.startswith("com.google.enterprise.webapp.") and existing.get("name") == title:
+                return str(package)
+        return ""
 
     def _link_app_in_team(self, team: int, title: str) -> str:
         """This team's published web app of that name, or empty if it has none
