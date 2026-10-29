@@ -199,12 +199,17 @@ class FleetMdm:
         launcher on the team and another permanent app in the enterprise, Fleet offering no way
         to delete one.
 
-        So the url goes in the published title, and the title is the identity. Fleet never hands
-        a web app's url back, and the team does not identify a deployment either -- the original
-        bug was a new deployment reusing the team name of the one it replaced, finding "Deploy
-        App" already there, and handing every device an icon for the decommissioned host. Naming
-        the host makes a re-run match and a move not match, which is exactly the distinction we
-        cannot otherwise draw.
+        So the deployment goes in the published title and the title is the identity -- its first
+        DNS label rather than the whole host, because Google refuses a title of 30 characters or
+        more; see _published_title. Fleet never hands a web app's url back, and the team does not
+        identify a deployment either -- the original bug was a new deployment reusing the team
+        name of the one it replaced, finding "Deploy App" already there, and handing every device
+        an icon for the decommissioned host. Naming the deployment makes a re-run match and a
+        move not match, which is exactly the distinction we cannot otherwise draw.
+
+        Fleet lists a web app under its package name until a device reports the title, so apply()
+        sets the display name straight after assigning it. A run that stops in between leaves an
+        app this lookup cannot see; the conflict below says how to recover it.
 
         The icon is required rather than decorative -- without one Google never publishes the app
         and every device reports the install as NOT_FOUND.
