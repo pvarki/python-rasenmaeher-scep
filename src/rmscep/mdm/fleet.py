@@ -239,8 +239,10 @@ class FleetMdm:
                 raise FleetError(
                     f"the MDM already has a web app named {title!r} but will not show it. A web app cannot be "
                     "deleted, and it outlives the team it was assigned to, so a team that was deleted and "
-                    "recreated leaves the name taken. Give this deployment a different launcher title, or a "
-                    "host of its own."
+                    "recreated leaves the name taken. First look in this team for a web app with an empty "
+                    "display name: a run that stopped between publishing and naming leaves one, and giving it "
+                    f"the display name {title!r} in the MDM lets this run reuse it. If there is none, the name "
+                    "is spent -- give this deployment a different launcher title, or a host of its own."
                 ) from exc
             LOGGER.info("Launcher web app %s is already published as %r, reusing it", found, title)
             return found

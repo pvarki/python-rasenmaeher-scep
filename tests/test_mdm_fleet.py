@@ -450,6 +450,7 @@ def test_a_wiped_team_says_what_is_wrong_instead_of_just_409(monkeypatch: pytest
     said = str(caught.value)
     assert "Deploy App (same)" in said, f"it must name the title that is taken, said: {said}"
     assert "deleted" in said.lower() or "cannot be deleted" in said.lower(), f"it must say why: {said}"
+    assert "display name" in said.lower(), f"it must offer the recoverable case before giving up: {said}"
     assert len(fleet.web_apps) == 1, "it must not have published a second app before failing"
 
 
