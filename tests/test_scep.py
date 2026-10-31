@@ -86,6 +86,10 @@ def build_pkcs_req(
     device_key: Any = None,
     force_ber: bool = False,
     sign_with_other_key: bool = False,
+    payload_override: bytes | None = None,
+    drop_attribute: str | None = None,
+    empty_attribute: str | None = None,
+    subject_extra: list[tuple[Any, str]] | None = None,
 ) -> bytes:
     """Assemble a PKCSReq exactly as a client would
 
@@ -94,7 +98,10 @@ def build_pkcs_req(
     """
     key = device_key or rsa.generate_private_key(public_exponent=65537, key_size=2048)
     builder = x509.CertificateSigningRequestBuilder().subject_name(
-        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, callsign)])
+        x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, callsign)]
+            + [x509.NameAttribute(oid, value) for oid, value in subject_extra or []]
+        )
     )
     if challenge is not None:
         builder = builder.add_attribute(x509.ObjectIdentifier(OID_CHALLENGE_PASSWORD), challenge.encode("utf-8"))
@@ -102,7 +109,7 @@ def build_pkcs_req(
 
     envelope = (
         pkcs7.PKCS7EnvelopeBuilder()
-        .set_data(csr.public_bytes(serialization.Encoding.DER))
+        .set_data(csr.public_bytes(serialization.Encoding.DER) if payload_override is None else payload_override)
         .add_recipient(ra.cert)
         .encrypt(serialization.Encoding.DER, [pkcs7.PKCS7Options.Binary])
     )
@@ -124,6 +131,17 @@ def build_pkcs_req(
             cms.CMSAttribute({"type": "scep_sender_nonce", "values": [sender_nonce]}),
         ]
     )
+    if drop_attribute or empty_attribute:
+        kept = []
+        for attribute in attrs:
+            name = attribute["type"].native
+            if name == drop_attribute:
+                continue
+            if name == empty_attribute:
+                attribute = cms.CMSAttribute({"type": name, "values": []})
+            kept.append(attribute)
+        attrs = cms.CMSAttributes(kept)
+
     signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048) if sign_with_other_key else key
     signature = _sign(signing_key, attrs.dump())
     is_ec = isinstance(signing_key, ec.EllipticCurvePrivateKey)
@@ -170,15 +188,24 @@ def test_round_trip(ra_identity: RaIdentity) -> None:
 def test_elliptic_curve_device_key(ra_identity: RaIdentity) -> None:
     """A device whose own key is a curve is fine
 
-    Only the RA key has to be RSA, because the envelope is RSA key transport. What the device puts
-    in the request is its own business, and a curve is the better choice wherever the MDM offers
-    one, so the responder has to verify an ECDSA signed request.
+    Parsing it has to work, so that the refusal can be a signed answer rather than a crash: the
+    certificate goes back encrypted to the device key, which needs RSA, and the view refuses it.
     """
     body = build_pkcs_req(ra_identity, "OTTER2", device_key=ec.generate_private_key(ec.SECP256R1()))
     parsed = parse_pkcs_req(body, ra_identity)
     assert parsed.common_name == "OTTER2"
     request = x509.load_pem_x509_csr(parsed.csr_pem.encode("utf-8"))
     assert isinstance(request.public_key(), ec.EllipticCurvePublicKey)
+
+
+def test_a_subject_packed_with_attributes_is_refused(ra_identity: RaIdentity) -> None:
+    """A device subject is a name and a few fields an MDM template adds, not dozens"""
+    unit = [(NameOID.ORGANIZATIONAL_UNIT_NAME, "Devices")]
+    assert parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER7", subject_extra=unit), ra_identity)
+
+    padded = [(NameOID.ORGANIZATIONAL_UNIT_NAME, f"unit{n}") for n in range(8)]
+    with pytest.raises(ScepError):
+        parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER7", subject_extra=padded), ra_identity)
 
 
 def test_ber_encoded_envelope(ra_identity: RaIdentity) -> None:
@@ -220,10 +247,11 @@ def test_oversized_request_is_refused_before_any_crypto(ra_identity: RaIdentity)
 
 def test_responses_are_well_formed(ra_identity: RaIdentity) -> None:
     """Success, failure and GetCACert all have to be things a client can parse"""
-    body = build_pkcs_req(ra_identity, "OTTER6")
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    body = build_pkcs_req(ra_identity, "OTTER6", device_key=key)
     parsed = parse_pkcs_req(body, ra_identity)
 
-    issued = _self_signed(rsa.generate_private_key(public_exponent=65537, key_size=2048), "OTTER6")
+    issued = _self_signed(key, "OTTER6")
     issued_pem = issued.public_bytes(serialization.Encoding.PEM).decode("utf-8")
     success = cms.ContentInfo.load(cert_rep(ra_identity, parsed, issued_pem))
     assert success["content_type"].native == "signed_data"
@@ -238,6 +266,24 @@ def test_responses_are_well_formed(ra_identity: RaIdentity) -> None:
     assert len(cacert["content"]["certificates"]) == 2
 
 
+def test_the_reply_carries_only_the_device_certificate(ra_identity: RaIdentity) -> None:
+    """RASENMAEHER appends its CA chain, and a client taking the first certificate would pair its
+    key with a CA certificate, which Android refuses to store"""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    parsed = parse_pkcs_req(build_pkcs_req(ra_identity, "OTTER8", device_key=key), ra_identity)
+    leaf = _self_signed(key, "OTTER8")
+    ca = _self_signed(ec.generate_private_key(ec.SECP256R1()), "Some CA")
+    chain_pem = b"".join(c.public_bytes(serialization.Encoding.PEM) for c in (leaf, ca)).decode("utf-8")
+
+    reply = cms.ContentInfo.load(cert_rep(ra_identity, parsed, chain_pem))
+    enveloped = reply["content"]["encap_content_info"]["content"].native
+    certs_only = pkcs7.pkcs7_decrypt_der(enveloped, parsed.device_cert, key, [])
+    assert pkcs7.load_der_pkcs7_certificates(certs_only) == [leaf]
+
+    with pytest.raises(ScepError):
+        cert_rep(ra_identity, parsed, ca.public_bytes(serialization.Encoding.PEM).decode("utf-8"))
+
+
 def test_ra_identity_is_stable_and_rsa(tmp_path: Path) -> None:
     """Loading twice must give the same key, or devices encrypt to something we cannot read"""
     first = RaIdentity.load_or_create(tmp_path)
@@ -250,3 +296,38 @@ def test_ra_identity_is_stable_and_rsa(tmp_path: Path) -> None:
 def test_challenge_attribute_oid_is_the_standard_one() -> None:
     """Cheap guard against a typo nobody would notice until a device silently failed"""
     assert OID_CHALLENGE_PASSWORD == "1.2.840.113549.1.9.7"
+
+
+@pytest.mark.parametrize("payload", [b"", b"not asn.1 at all", b"\x30\x82\x01\x00" + b"\x00" * 64])
+def test_a_decryptable_request_that_is_not_a_csr_is_refused(ra_identity: RaIdentity, payload: bytes) -> None:
+    """Decrypting only proves the caller had our public key, and anyone can fetch that
+
+    Everything after the decrypt reads bytes the caller chose, so it has to refuse rather than
+    raise: an uncaught exception here is a 500 on an internet facing endpoint.
+    """
+    body = build_pkcs_req(ra_identity, "OTTER1", payload_override=payload)
+    with pytest.raises(ScepError):
+        parse_pkcs_req(body, ra_identity)
+
+
+@pytest.mark.parametrize(
+    "drop",
+    ["scep_transaction_id", "scep_sender_nonce", "scep_message_type"],
+)
+def test_a_missing_scep_attribute_is_refused(ra_identity: RaIdentity, drop: str) -> None:
+    """These reads are reachable with no crypto at all, so they must never raise
+
+    A handful of DER bytes with no transactionID is enough; the caller needs no envelope and no
+    key. An unhandled KeyError here is a 500 and a traceback on an internet facing endpoint.
+    """
+    body = build_pkcs_req(ra_identity, "OTTER1", drop_attribute=drop)
+    with pytest.raises(ScepError):
+        parse_pkcs_req(body, ra_identity)
+
+
+@pytest.mark.parametrize("empty", ["scep_transaction_id", "scep_sender_nonce", "scep_message_type"])
+def test_an_empty_scep_attribute_is_refused(ra_identity: RaIdentity, empty: str) -> None:
+    """An attribute that is present but carries a zero element SET OF indexes out of range"""
+    body = build_pkcs_req(ra_identity, "OTTER1", empty_attribute=empty)
+    with pytest.raises(ScepError):
+        parse_pkcs_req(body, ra_identity)

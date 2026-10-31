@@ -1,0 +1,514 @@
+"""The MDM dialect, against a stubbed transport
+
+What matters here is the ORDER and the restraint: the policy has to be in force before anything
+installs, and an unchanged policy must not be re-uploaded, because a policy rewritten on every
+pass never settles long enough for the device to finish installing anything.
+"""
+
+import json
+import re
+from typing import Any
+
+import httpx
+import pytest
+
+from rmscep.mdm import FleetError, FleetMdm
+from rmscep.mdm.icon import launcher_icon
+from rmscep.mdmtemplate import App, Certificate, LinkApp, MdmTemplate
+
+TEMPLATE = MdmTemplate(
+    apps=(
+        App(package="com.example.one", preinstall=True, config={"k": "v"}),
+        App(package="com.example.two", preinstall=False),
+    ),
+    policy={"defaultPermissionPolicy": "GRANT"},
+)
+
+
+class _Fleet:
+    """A Fleet that records what it was told, in order"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.titles: list[dict[str, Any]] = []
+        self.profiles: list[dict[str, Any]] = []
+        self.certificates: list[dict[str, Any]] = []
+        self.hosts: list[dict[str, Any]] = []
+        self.web_apps: list[dict[str, Any]] = []
+        self.authorities: list[dict[str, Any]] = [{"id": 3, "name": "RMSCEP", "url": "https://deployment.test/scep"}]
+        self._next_id = 100
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.calls.append((request.method, path))
+        if path.endswith("/hosts") and request.method == "GET":
+            return httpx.Response(200, json={"hosts": [{"id": h["id"]} for h in self.hosts]})
+        if path.endswith("/device_mapping"):
+            which = int(path.split("/hosts/")[1].split("/")[0])
+            found = next(h for h in self.hosts if h["id"] == which)
+            return httpx.Response(200, json={"device_mapping": found.get("device_mapping") or []})
+        if "/hosts/" in path and request.method == "GET":
+            which = int(path.rsplit("/", 1)[-1])
+            found = next(h for h in self.hosts if h["id"] == which)
+            return httpx.Response(200, json={"host": {"mdm": {"profiles": found.get("profiles") or []}}})
+        if path.endswith("/certificate_authorities") and request.method == "GET":
+            # Fleet's listing omits the url; only the detail carries it. Mirrored so a check
+            # that reads the url off the listing fails here too.
+            return httpx.Response(
+                200,
+                json={
+                    "certificate_authorities": [{k: v for k, v in a.items() if k != "url"} for a in self.authorities]
+                },
+            )
+        if "/certificate_authorities/" in path and request.method == "GET":
+            which = int(path.rsplit("/", 1)[-1])
+            matching = [a for a in self.authorities if a["id"] == which]
+            return httpx.Response(200, json=matching[0] if matching else {})
+        if path.endswith("/certificate_authorities") and request.method == "POST":
+            body = json.loads(request.content)["custom_scep_proxy"]
+            made = {"id": 55, "name": body["name"], "url": body["url"]}
+            self.authorities.append(made)
+            return httpx.Response(200, json={"certificate_authority": made})
+        if "/certificate_authorities/" in path and request.method == "PATCH":
+            which = int(path.rsplit("/", 1)[-1])
+            body = json.loads(request.content)["custom_scep_proxy"]
+            if "name" in body:
+                # Fleet reads a name on a PATCH as a rename and refuses it as a conflict with
+                # the authority's own name. Measured against a live Fleet 4.90.1.
+                return httpx.Response(409, json={"message": "Conflict"})
+            for authority in self.authorities:
+                if authority["id"] == which:
+                    authority["url"] = body["url"]
+            return httpx.Response(200, json={})
+        if path.endswith("/certificates") and request.method == "GET":
+            return httpx.Response(200, json={"certificates": self.certificates})
+        if path.endswith("/certificates") and request.method == "POST":
+            body = json.loads(request.content)
+            made = {
+                "id": 27,
+                "name": body["name"],
+                "subject_name": body["subject_name"],
+                "certificate_authority_id": body["certificate_authority_id"],
+            }
+            self.certificates.append(made)
+            return httpx.Response(200, json=made)
+        if "/certificates/" in path and request.method == "DELETE":
+            gone = int(path.rsplit("/", 1)[-1])
+            self.certificates = [c for c in self.certificates if c["id"] != gone]
+            return httpx.Response(200, json={})
+        if path == "/api/latest/fleet/teams" and request.method == "GET":
+            return httpx.Response(200, json={"teams": [{"id": 7, "name": "rmscep"}, {"id": 8, "name": "prep"}]})
+        if path.endswith("/software/titles"):
+            # Fleet scopes the listing to one team. A stub that ignored team_id would let a
+            # lookup find another team's app and call that a pass.
+            wanted_team = request.url.params.get("team_id")
+            listed = [t for t in self.titles if wanted_team is None or str(t.get("team_id")) == str(wanted_team)]
+            return httpx.Response(200, json={"software_titles": listed})
+        if path.endswith("/software/web_apps"):
+            # Publishing the SAME url twice yields TWO package names: observed against the real
+            # Fleet, where one url gave x023e... and then xb017.... Google does not dedupe by
+            # url, which is what makes every re-run leave a permanent orphan behind.
+            body = request.content.decode("utf-8", "replace")
+            url_match = re.search(r'name="url"\r?\n\r?\n([^\r\n]+)', body)
+            title_match = re.search(r'name="title"\r?\n\r?\n([^\r\n]+)', body)
+            wanted = url_match.group(1) if url_match else ""
+            asked = title_match.group(1) if title_match else ""
+            if len(asked) >= 30:
+                # Google refuses a web app title of 30 characters or more, as a bare 400.
+                return httpx.Response(400, json={"message": "Couldn't create. Please check the provided data"})
+            if any(a["title"] == asked for a in self.web_apps):
+                # Fleet refuses a name already published to the enterprise, whatever team it is
+                # in and even if its team is gone. Publishing cannot be undone.
+                return httpx.Response(409, json={"message": "Web app with this name already exists in this fleet"})
+            self._next_id += 1
+            pkg = f"com.google.enterprise.webapp.x{self._next_id:08x}"
+            self.web_apps.append(
+                {"app_store_id": pkg, "url": wanted, "title": title_match.group(1) if title_match else ""}
+            )
+            return httpx.Response(200, json={"app_store_id": pkg})
+        if path.endswith("/app_store_app") and request.method == "PATCH":
+            body = json.loads(request.read())
+            title_id = int(path.split("/")[-2])
+            for title in self.titles:
+                if title["id"] == title_id and "display_name" in body:
+                    title["display_name"] = body["display_name"]
+            return httpx.Response(200, json={"app_store_app": {}})
+        if path.endswith("/software/app_store_apps"):
+            # This is what puts an app in a team. A new web app is listed under its package name,
+            # not its title, until a device reports it: seen on the real Fleet.
+            body = json.loads(request.read())
+            self._next_id += 1
+            self.titles.append(
+                {
+                    "id": self._next_id,
+                    "name": body["app_store_id"],
+                    "display_name": "",
+                    "team_id": body.get("team_id"),
+                    "app_store_app": {"app_store_id": body["app_store_id"]},
+                }
+            )
+            return httpx.Response(200, json={"software_title_id": self._next_id})
+        if path.endswith("/configuration_profiles"):
+            if request.method == "GET":
+                return httpx.Response(200, json={"profiles": list(self.profiles)})
+            # An upload the MDM keeps, so a second pass can see it is already there. Without
+            # this the adapter is right to upload again: a profile that has gone missing must
+            # be restored whatever we remember pushing.
+            self.profiles.append({"name": "rmscep-policy", "profile_uuid": f"uuid-{len(self.profiles)}"})
+            return httpx.Response(200, json={})
+        if "/configuration_profiles/" in path and request.method == "DELETE":
+            self.profiles.clear()
+            return httpx.Response(200, json={})
+        if "/app_store_app" in path or path.endswith("/setup_experience/software"):
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={})
+
+
+def _mdm(fleet: _Fleet, monkeypatch: pytest.MonkeyPatch) -> FleetMdm:
+    transport = httpx.MockTransport(fleet.handler)
+    monkeypatch.setattr(httpx, "request", lambda m, u, **kw: httpx.Client(transport=transport).request(m, u, **kw))
+    monkeypatch.setattr(httpx, "post", lambda u, **kw: httpx.Client(transport=transport).post(u, **kw))
+    return FleetMdm("https://mdm.test", "token")
+
+
+def test_the_policy_lands_before_anything_installs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permission grant only applies to an app that installs while it is already in force
+
+    Land it late and the device comes up facing a permission wizard, with a certificate no app
+    is allowed to see.
+    """
+    fleet = _Fleet()
+    _mdm(fleet, monkeypatch).apply("rmscep", TEMPLATE)
+
+    paths = [p for _, p in fleet.calls]
+    profile = next(i for i, p in enumerate(paths) if p.endswith("/configuration_profiles"))
+    install = next(i for i, p in enumerate(paths) if p.endswith("/software/app_store_apps"))
+    assert profile < install, f"policy must precede installs, got {paths}"
+
+
+def test_only_the_chosen_apps_install_at_enrolment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rest stay available on demand rather than lengthening the enrolment burst"""
+    fleet = _Fleet()
+    result = _mdm(fleet, monkeypatch).apply("rmscep", TEMPLATE)
+    assert result["preinstall"] == ["com.example.one"]
+    assert len(result["assigned"]) == 2
+
+
+def test_an_unchanged_policy_is_not_rewritten(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured: a policy rewritten every pass never settles and nothing ever installs"""
+    fleet = _Fleet()
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", TEMPLATE)
+    uploads_after_first = len([1 for m, p in fleet.calls if m == "POST" and p.endswith("/configuration_profiles")])
+    mdm.apply("rmscep", TEMPLATE)
+    uploads_after_second = len([1 for m, p in fleet.calls if m == "POST" and p.endswith("/configuration_profiles")])
+    assert uploads_after_second == uploads_after_first, "the same policy must not be uploaded twice"
+
+
+def test_force_reaches_a_host_that_just_joined(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profile is delivered when the PROFILE changes, not when a host arrives"""
+    fleet = _Fleet()
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", TEMPLATE)
+    before = len([1 for m, p in fleet.calls if m == "POST" and p.endswith("/configuration_profiles")])
+    mdm.apply("rmscep", TEMPLATE, force_policy=True)
+    after = len([1 for m, p in fleet.calls if m == "POST" and p.endswith("/configuration_profiles")])
+    assert after == before + 1
+
+
+def test_a_refusal_is_reported_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Applying half a template is worse than applying none"""
+    transport = httpx.MockTransport(lambda request: httpx.Response(403, text="nope"))
+    monkeypatch.setattr(httpx, "request", lambda m, u, **kw: httpx.Client(transport=transport).request(m, u, **kw))
+    with pytest.raises(FleetError):
+        FleetMdm("https://mdm.test", "token").apply("rmscep", TEMPLATE)
+
+
+def test_the_launcher_icon_is_a_valid_png() -> None:
+    """Without one the web app is accepted and then never published, and every install says NOT_FOUND"""
+    png = launcher_icon()
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    width = int.from_bytes(png[16:20], "big")
+    height = int.from_bytes(png[20:24], "big")
+    assert width == height == 512, "square and at least 512x512 is enforced"
+
+
+def test_the_link_app_is_offered_alongside_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is a browser shortcut, so it only works if the browser is installed too"""
+    fleet = _Fleet()
+    monkeypatch.setattr(FleetMdm, "ensure_link_app", lambda self, team, title, url: "com.google.enterprise.webapp.test")
+    with_link = MdmTemplate(apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp("Deploy App", "https://x/"))
+    result = _mdm(fleet, monkeypatch).apply("rmscep", with_link)
+    assert "com.google.enterprise.webapp.test" in result["preinstall"]
+
+
+def test_the_certificate_template_is_stated_before_anything_else(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its subject names the device, which becomes its callsign
+
+    So it is configuration that gets reviewed and deployed, not something typed into a console.
+    """
+    fleet = _Fleet()
+    with_cert = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR,OU=$OTHER", authority="RMSCEP"),
+    )
+    _mdm(fleet, monkeypatch).apply("rmscep", with_cert)
+    paths = [p for _, p in fleet.calls]
+    assert any(p.endswith("/certificates") for p in paths), "the template must be stated"
+    cert = next(i for i, p in enumerate(paths) if p.endswith("/certificates"))
+    install = next(i for i, p in enumerate(paths) if p.endswith("/software/app_store_apps"))
+    assert cert < install
+
+
+def test_an_unknown_authority_is_named_rather_than_guessed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A template pointing at an authority that is not there would issue nothing, silently"""
+    fleet = _Fleet()
+    with_cert = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR", authority="NOT-THERE"),
+    )
+    with pytest.raises(FleetError, match="NOT-THERE"):
+        _mdm(fleet, monkeypatch).apply("rmscep", with_cert)
+
+
+def test_an_unchanged_certificate_template_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recreating it re-asks every device in the team, so it is not done for nothing"""
+    fleet = _Fleet()
+    with_cert = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR,OU=$OTHER", authority="RMSCEP"),
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", with_cert)
+    before = len([1 for method, path in fleet.calls if path.endswith("/certificates") and method == "POST"])
+    mdm.apply("rmscep", with_cert)
+    after = len([1 for method, path in fleet.calls if path.endswith("/certificates") and method == "POST"])
+    assert after == before, "an unchanged template must not be recreated"
+
+
+def test_forcing_the_certificate_asks_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordinary recovery: a device enrols before anyone can name it, so the first ask fails
+
+    Fleet never retries a failed certificate, and the template is what asks. Recreating it is the
+    only way a host named after it enrolled ever gets one.
+    """
+    fleet = _Fleet()
+    with_cert = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR,OU=$OTHER", authority="RMSCEP"),
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", with_cert)
+    fleet.calls.clear()
+    mdm.apply("rmscep", with_cert, force_certificate=True)
+
+    assert any(method == "DELETE" and "/certificates/" in path for method, path in fleet.calls)
+    assert any(method == "POST" and path.endswith("/certificates") for method, path in fleet.calls)
+    assert len(fleet.certificates) == 1, "the template is replaced, not duplicated"
+    assert fleet.certificates[0]["name"] == "rmscep", "the keystore alias has to stay the same"
+
+
+def _host(host_id: int, status: str, named: bool) -> dict[str, Any]:
+    return {
+        "id": host_id,
+        "profiles": [{"name": "rmscep", "status": status}],
+        "device_mapping": [{"email": "OTTER1@CODE", "source": "mdm_idp_accounts"}] if named else [],
+    }
+
+
+def test_a_host_named_after_enrolment_is_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Named, and still refused: asking again would now work"""
+    fleet = _Fleet()
+    fleet.hosts = [_host(1, "failed", named=True)]
+    assert _mdm(fleet, monkeypatch).hosts_awaiting_certificate(1, "rmscep") == [1]
+
+
+def test_a_host_nobody_has_named_is_not_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Asking again changes nothing until somebody names it, and re-asking is not free"""
+    fleet = _Fleet()
+    fleet.hosts = [_host(2, "failed", named=False)]
+    assert _mdm(fleet, monkeypatch).hosts_awaiting_certificate(1, "rmscep") == []
+
+
+def test_a_host_that_already_has_its_certificate_is_not_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Otherwise every pass would re-ask the whole group forever"""
+    fleet = _Fleet()
+    fleet.hosts = [_host(3, "verified", named=True)]
+    assert _mdm(fleet, monkeypatch).hosts_awaiting_certificate(1, "rmscep") == []
+
+
+def _with_cert(authority: str = "RMSCEP") -> MdmTemplate:
+    """A template that asks for a certificate, which is what drags the authority in"""
+    return MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        certificate=Certificate(name="rmscep", subject="CN=$VAR,OU=$OTHER", authority=authority),
+    )
+
+
+def test_a_fresh_mdm_gets_the_authority_created(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pointing the MDM at us is configuration, and Fleet lets us do it, so nobody should type it
+
+    Without this a deployment is not set up by running one command: it is one command plus a
+    console, and the console step is the one people get wrong.
+    """
+    fleet = _Fleet()
+    fleet.authorities = []
+    _mdm(fleet, monkeypatch).apply("rmscep", _with_cert(), scep_url="https://new.test/scep", challenge="not-a-secret")
+    created = [c for c in fleet.calls if c == ("POST", "/api/latest/fleet/certificate_authorities")]
+    assert created, "the authority should have been created"
+    assert fleet.authorities[0]["url"] == "https://new.test/scep"
+
+
+def test_an_authority_already_pointing_at_us_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rewriting it for nothing is churn on something every device depends on"""
+    fleet = _Fleet()
+    _mdm(fleet, monkeypatch).apply(
+        "rmscep", _with_cert(), scep_url="https://deployment.test/scep", challenge="not-a-secret"
+    )
+    touched = [c for c in fleet.calls if c[0] in ("POST", "PATCH") and c[1].endswith("certificate_authorities")]
+    assert not touched, "an authority already pointing at us must not be rewritten"
+
+
+def test_a_drifted_authority_is_repointed_not_duplicated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The name is ours, so a different URL means the deployment moved
+
+    Creating a second one would leave the certificate template pointing at whichever the lookup
+    happened to find first.
+    """
+    fleet = _Fleet()
+    _mdm(fleet, monkeypatch).apply("rmscep", _with_cert(), scep_url="https://moved.test/scep", challenge="rotated")
+    assert len(fleet.authorities) == 1, "a drifted authority must be repointed, not duplicated"
+    assert fleet.authorities[0]["url"] == "https://moved.test/scep"
+
+
+def test_without_a_scep_url_the_authority_must_already_exist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The path for an MDM we cannot create one in: state what is there, or say what is missing"""
+    fleet = _Fleet()
+    fleet.authorities = []
+    with pytest.raises(FleetError, match="RMSCEP"):
+        _mdm(fleet, monkeypatch).apply("rmscep", _with_cert())
+
+
+def test_repointing_does_not_try_to_rename(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fleet refuses a PATCH that carries a name, as a conflict with the name already there
+
+    Found against a live Fleet: every repoint answered 409 and no deployment could be moved to
+    a new responder without deleting the authority by hand.
+    """
+    fleet = _Fleet()
+    _mdm(fleet, monkeypatch).apply("rmscep", _with_cert(), scep_url="https://moved.test/scep", challenge="rotated")
+    assert fleet.authorities[0]["url"] == "https://moved.test/scep", "the repoint must have gone through"
+
+
+def test_applying_twice_publishes_one_web_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A re-run reuses the launcher instead of leaving another permanent one behind
+
+    Google does not dedupe by url: the same url published twice came back as two package names,
+    so every mdm-apply added another launcher to the team. Fleet cannot delete a web app, so each
+    one is permanent, and the third publish of a name is refused outright.
+    """
+    fleet = _Fleet()
+    template = MdmTemplate(
+        apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp(title="Deploy App", url="https://same.test/")
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", template)
+    mdm.apply("rmscep", template)
+
+    assert len(fleet.web_apps) == 1, f"the re-run must not publish again, got {[a['title'] for a in fleet.web_apps]}"
+    launchers = [t for t in fleet.titles if t["display_name"].startswith("Deploy App")]
+    assert len(launchers) == 1, "the team must end up with one launcher, not one per run"
+
+
+def test_the_preparation_team_holds_the_same_launcher_and_no_certificate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A device moving from the preparation team keeps the apps it enrolled with, and only those
+
+    So the launcher has to be the same package in both teams. One of its own is another package,
+    which the move uninstalls and nothing installs again: the phone loses its Deploy App icon.
+    """
+    fleet = _Fleet()
+    template = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        link_app=LinkApp(title="Deploy App", url="https://same.test/"),
+        certificate=Certificate(name="rmscep", subject="CN=$VAR", authority="RMSCEP"),
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    main = mdm.apply("rmscep", template)
+    fleet.calls.clear()
+    prep = mdm.apply_preparation("prep", template, main["link"])
+
+    assert len(fleet.web_apps) == 1, "the preparation team must not publish a launcher of its own"
+    assert main["link"] in prep["assigned"]
+    assert prep["assigned"] == main["assigned"]
+    assert not [p for _, p in fleet.calls if p.endswith("/certificates")], "nothing is asked for before the name"
+
+
+def test_a_wiped_team_says_what_is_wrong_instead_of_just_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name published to a team that no longer exists must fail legibly
+
+    A full fresh run deletes the team and makes it again. The web app outlives it, because Fleet
+    cannot delete one, so publishing the same name answers 409. Whether Fleet still lists an app
+    whose team is gone is not something this stub can decide, so the contract tested here is the
+    one that holds either way: when it cannot be found, the operator is told the name is taken
+    and what to do about it, rather than being handed a bare conflict.
+    """
+    fleet = _Fleet()
+    template = MdmTemplate(
+        apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp(title="Deploy App", url="https://same.test/")
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", template)
+    published = fleet.web_apps[-1]["app_store_id"]
+
+    # The team is deleted and recreated: its software titles go with it, the web app does not.
+    fleet.titles = [t for t in fleet.titles if (t.get("app_store_app") or {}).get("app_store_id") != published]
+
+    with pytest.raises(FleetError) as caught:
+        mdm.apply("rmscep", template)
+    said = str(caught.value)
+    assert "Deploy App (same)" in said, f"it must name the title that is taken, said: {said}"
+    assert "deleted" in said.lower() or "cannot be deleted" in said.lower(), f"it must say why: {said}"
+    assert "display name" in said.lower(), f"it must offer the recoverable case before giving up: {said}"
+    assert len(fleet.web_apps) == 1, "it must not have published a second app before failing"
+
+
+def test_the_launcher_points_at_this_deployment_not_the_last_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The web app is identified by the host it serves, never by a bare title
+
+    Fleet cannot read, change or delete a web app's url, so reusing one because the title matched
+    kept a decommissioned deployment's link and handed every device an icon that opened a host
+    which no longer existed. Everything else about the apply was correct, which is what made it
+    so quiet. The deployment that replaced it reused the team name too, so the team is no help:
+    the host in the title is what tells the two apart.
+    """
+    fleet = _Fleet()
+    template = MdmTemplate(
+        apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp(title="Deploy App", url="https://old.test/")
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    mdm.apply("rmscep", template)
+    first = fleet.web_apps[-1]["app_store_id"]
+
+    moved = MdmTemplate(
+        apps=TEMPLATE.apps, policy=TEMPLATE.policy, link_app=LinkApp(title="Deploy App", url="https://new.test/")
+    )
+    mdm.apply("rmscep", moved)
+    second = fleet.web_apps[-1]["app_store_id"]
+
+    assert fleet.web_apps[-1]["url"] == "https://new.test/", "the moved deployment must publish its own url"
+    assert second != first, "same title, different url: it must not reuse the old app"
+
+
+def test_the_launcher_title_names_the_deployment_and_fits() -> None:
+    """Google refuses a web app title of 30 characters or more, and a full host rarely fits"""
+    title = FleetMdm._published_title("Deploy App", "https://mtls.busy-phoenix.solution.dev.pvarki.fi/")
+    assert title == "Deploy App (busy-phoenix)"
+    long_name = FleetMdm._published_title("Deploy App", "https://mtls.thoughtful-hippopotamus.example.org/")
+    assert len(long_name) < 30
+    assert long_name.startswith("Deploy App (thoughtful")

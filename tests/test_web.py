@@ -7,13 +7,13 @@ responder makes before and after it asks.
 import datetime
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from asn1crypto import cms
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
 
@@ -46,19 +46,41 @@ def _a_certificate(common_name: str) -> str:
     return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
 
 
+def _certify(csrpem: str) -> str:
+    """What RASENMAEHER hands back: the request's key certified by a CA, with that CA appended"""
+    csr = x509.load_pem_x509_csr(csrpem.encode("utf-8"))
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
+    now = datetime.datetime.now(datetime.UTC)
+    leaf = (
+        x509.CertificateBuilder()
+        .subject_name(csr.subject)
+        .issuer_name(ca_name)
+        .public_key(csr.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .sign(ca_key, hashes.SHA256())
+    )
+    return leaf.public_bytes(serialization.Encoding.PEM).decode("utf-8") + _a_certificate("Test CA")
+
+
 class _StubRmapi:
-    """Stands in for RASENMAEHER"""
+    """Stands in for RASENMAEHER, which owns the challenge"""
 
     raises: Exception | None = None
+    seen: ClassVar[dict[str, Any]] = {}
 
     def __init__(self) -> None:
         pass
 
     async def complete_enrollment(self, callsign: str, csrpem: str, **kwargs: Any) -> IssuedCertificate:
-        _ = csrpem, kwargs
+        _StubRmapi.seen = kwargs
         if _StubRmapi.raises is not None:
             raise _StubRmapi.raises
-        return IssuedCertificate(callsign=callsign, certificate=_a_certificate(callsign))
+        if kwargs.get("challenge") != CHALLENGE:
+            raise RmapiRefused("HTTP 403")
+        return IssuedCertificate(callsign=callsign, certificate=_certify(csrpem))
 
 
 @pytest.fixture
@@ -68,10 +90,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[TestCli
     ca_chain.write_text(_a_certificate("Test CA"), encoding="utf-8")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "CA_CHAIN_PATH", ca_chain)
-    monkeypatch.setattr(config, "CHALLENGE", CHALLENGE)
     monkeypatch.setattr(config, "RMAPI_URL", "https://rasenmaeher.test")
     monkeypatch.setattr(scep_views, "Client", _StubRmapi)
     _StubRmapi.raises = None
+    _StubRmapi.seen = {}
     with TestClient(get_app_no_init()) as instance:
         yield instance
 
@@ -120,7 +142,7 @@ def test_enrolment(client: TestClient, tmp_path: Path) -> None:
 
 
 def test_wrong_challenge_is_refused(client: TestClient, tmp_path: Path) -> None:
-    """The challenge is a nuisance filter, but it is still checked"""
+    """RASENMAEHER checks the challenge, and its refusal reaches the device as a final answer"""
     ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
     body = build_pkcs_req(ra, ISSUED_CALLSIGN, challenge="not the one")
     response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
@@ -128,30 +150,54 @@ def test_wrong_challenge_is_refused(client: TestClient, tmp_path: Path) -> None:
     assert _pki_status(response.content) == ("2", "1")
 
 
-def test_no_challenge_configured_refuses_everything(
-    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unconfigured responder must not become an open endpoint"""
-    monkeypatch.setattr(config, "CHALLENGE", "")
+def test_the_device_challenge_is_passed_on(client: TestClient, tmp_path: Path) -> None:
+    """RASENMAEHER owns the challenge, so what the device sent is handed over unchanged"""
     ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
-    body = build_pkcs_req(ra, ISSUED_CALLSIGN)
+    client.post("/scep", params={"operation": "PKIOperation"}, content=build_pkcs_req(ra, ISSUED_CALLSIGN))
+    assert _StubRmapi.seen["challenge"] == CHALLENGE
+
+
+def test_a_curve_device_key_is_refused_before_anything_is_issued(client: TestClient, tmp_path: Path) -> None:
+    """The certificate could not be encrypted back to it, so asking for one would spend the callsign"""
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN, device_key=ec.generate_private_key(ec.SECP256R1()))
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
+    assert _pki_status(response.content) == ("2", "0")
+    assert not _StubRmapi.seen, "RASENMAEHER must not be asked to issue it"
+
+
+def test_a_request_without_a_challenge_is_refused_here(client: TestClient, tmp_path: Path) -> None:
+    """No challenge can never be right, so RASENMAEHER is not even asked"""
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN, challenge=None)
     response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
     assert _pki_status(response.content)[0] == "2"
+    assert not _StubRmapi.seen
 
 
-@pytest.mark.parametrize(
-    ("error", "expected_fail_info"),
-    [(RmapiRefused("not planned"), "1"), (RmapiUnavailable("down"), "2")],
-)
-def test_rasenmaeher_answers_are_mapped(
-    client: TestClient, tmp_path: Path, error: Exception, expected_fail_info: str
-) -> None:
-    """A refusal is final for the device, an outage is not our fault -- both are told plainly"""
-    _StubRmapi.raises = error
+def test_a_refusal_is_final_and_signed(client: TestClient, tmp_path: Path) -> None:
+    """Closed, already taken, not ours: the device gains nothing by asking again"""
+    _StubRmapi.raises = RmapiRefused("taken")
     ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
     body = build_pkcs_req(ra, ISSUED_CALLSIGN)
     response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
-    assert _pki_status(response.content) == ("2", expected_fail_info)
+    assert response.status_code == 200, "a refusal is a signed CertRep, not an HTTP error"
+    assert _pki_status(response.content) == ("2", "1")
+
+
+def test_an_outage_is_retryable_not_a_verdict(client: TestClient, tmp_path: Path) -> None:
+    """A CertRep carrying failInfo is FINAL to a SCEP client
+
+    Answering one when RASENMAEHER merely hiccuped spends the enrolment for good. The front proxy
+    OCSP-checks our client certificate and a freshly issued one is unknown to the responder until
+    its next refresh, so this is an ordinary startup condition, not a rare one.
+    """
+    _StubRmapi.raises = RmapiUnavailable("down")
+    ra = __import__("rmscep.scep", fromlist=["RaIdentity"]).RaIdentity.load_or_create(tmp_path / "ra")
+    body = build_pkcs_req(ra, ISSUED_CALLSIGN)
+    response = client.post("/scep", params={"operation": "PKIOperation"}, content=body)
+    assert response.status_code == 503, "the MDM has to be able to come back"
+    assert b"BEGIN" not in response.content and response.headers["content-type"].startswith("text/plain")
 
 
 def test_oversized_body_is_refused_without_parsing(client: TestClient) -> None:
@@ -172,7 +218,7 @@ def test_healthcheck_reports_configuration(client: TestClient, monkeypatch: pyte
     assert healthy["healthy"] is True
     assert "RA serial" in str(healthy["extra"])
 
-    monkeypatch.setattr(config, "CHALLENGE", "")
+    monkeypatch.setattr(config, "RMAPI_URL", "")
     idle = client.get("/api/v1/healthcheck").json()
     assert idle["healthy"] is True, "unconfigured is idle, not broken -- autoheal would loop otherwise"
     assert "enrolment refused" in str(idle["extra"])
@@ -180,3 +226,68 @@ def test_healthcheck_reports_configuration(client: TestClient, monkeypatch: pyte
     monkeypatch.setattr(config, "CA_CHAIN_PATH", Path("/nonexistent/ca_chain.pem"))
     broken = client.get("/api/v1/healthcheck").json()
     assert broken["healthy"] is False
+
+
+def _client_cert(tmp_path: Path, days: int) -> tuple[Path, Path]:
+    """A client identity that expires in `days` days (negative for already expired)"""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "rmscep")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=400))
+        .not_valid_after(now + datetime.timedelta(days=days))
+        .sign(key, hashes.SHA256())
+    )
+    certfile, keyfile = tmp_path / "rmscep.pem", tmp_path / "rmscep.key"
+    certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    keyfile.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return certfile, keyfile
+
+
+def test_healthcheck_looks_at_the_client_identity(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a usable client certificate not one enrolment can be completed
+
+    Reporting healthy anyway hides the single thing most likely to take this service off the air,
+    because the certificate is short lived and nothing renews it while the container keeps running.
+    """
+    certfile, keyfile = _client_cert(tmp_path, days=200)
+    monkeypatch.setattr(config, "CERT", certfile)
+    monkeypatch.setattr(config, "KEY", keyfile)
+    good = client.get("/api/v1/healthcheck").json()
+    assert good["healthy"] is True
+    assert "client certificate valid" in str(good["extra"])
+
+    monkeypatch.setattr(config, "CERT", tmp_path / "gone.pem")
+    missing = client.get("/api/v1/healthcheck").json()
+    assert missing["healthy"] is False, "a missing identity is not healthy"
+
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    expired_cert, expired_key = _client_cert(old_dir, days=-1)
+    monkeypatch.setattr(config, "CERT", expired_cert)
+    monkeypatch.setattr(config, "KEY", expired_key)
+    expired = client.get("/api/v1/healthcheck").json()
+    assert expired["healthy"] is False, "an expired identity is not healthy"
+    assert "expired" in str(expired["extra"])
+
+
+def test_healthcheck_in_the_mesh_needs_no_certificate(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where the mesh presents our identity there is nothing on disk to check"""
+    monkeypatch.setattr(config, "CERT", None)
+    monkeypatch.setattr(config, "KEY", None)
+    meshed = client.get("/api/v1/healthcheck").json()
+    assert meshed["healthy"] is True
+    assert "from the mesh" in str(meshed["extra"])

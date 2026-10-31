@@ -20,7 +20,7 @@ jobs:
 
   publish:
     name: Publish Docker image
-    runs-on: ubuntu-latest # arc-runner-set
+    runs-on: arc-runner-set
     permissions:
       contents: read
       packages: write

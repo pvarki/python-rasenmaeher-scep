@@ -7,12 +7,14 @@ stop and report a failed certificate instead of retrying for ever.
 
 import logging
 
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import APIRouter, Request, Response
 
 from .. import config
 from ..rmapi import Client, RmapiRefused, RmapiUnavailable
 from ..scep import (
     CAPS,
+    FAIL_BAD_ALG,
     FAIL_BAD_IDENTITY,
     FAIL_BAD_REQUEST,
     MAX_REQUEST_BYTES,
@@ -90,26 +92,40 @@ async def scep_post(request: Request, operation: str = "") -> Response:
             media_type=PKI_MESSAGE,
         )
 
-    if not config.CHALLENGE:
-        # Refusing to run without one is deliberate: an empty setting would otherwise mean an
-        # endpoint that accepts anything, which is the opposite of what it is for.
-        return refuse("no challenge is configured", FAIL_BAD_REQUEST)
-    if parsed.challenge != config.CHALLENGE:
-        return refuse("wrong challenge", FAIL_BAD_IDENTITY)
+    if not parsed.challenge:
+        return refuse("no challenge", FAIL_BAD_REQUEST)
+    if not isinstance(parsed.device_cert.public_key(), rsa.RSAPublicKey):
+        # The certificate goes back encrypted to this key, and that needs RSA. Refused before
+        # RASENMAEHER issues anything, so an MDM set to curve keys does not spend the name.
+        return refuse("the device key is not RSA", FAIL_BAD_ALG)
 
     try:
+        # RASENMAEHER checks the challenge, and whether an admin has opened enrolment at all, so
+        # both can be changed from the admin UI rather than by redeploying this.
         issued = await Client().complete_enrollment(
             callsign=callsign,
             csrpem=parsed.csr_pem,
+            challenge=parsed.challenge,
             request_id=request.headers.get("X-Request-ID"),
             forwarded_for=request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP"),
         )
     except RmapiRefused as exc:
-        # Not planned, already taken, or not ours to complete. The device cannot fix this by
-        # retrying; the operator plans another callsign.
+        # Closed, already taken, or not a name a callsign may be. The device cannot fix this by
+        # retrying; the operator opens enrolment or changes the MDM's name for it.
         return refuse(f"rasenmaeher refused ({exc})", FAIL_BAD_IDENTITY)
     except RmapiUnavailable as exc:
-        return refuse(f"rasenmaeher unavailable ({exc})", FAIL_BAD_REQUEST)
+        # Somebody else's bad day, not a verdict on this device, so it must NOT get a signed
+        # failure: a CertRep carrying failInfo is final to a SCEP client and would spend the
+        # enrolment on a hiccup. An HTTP error is the one answer the MDM will come back from.
+        # Reachable in ordinary operation: the front proxy OCSP-checks our client certificate and
+        # a freshly issued one is unknown to the responder until its next refresh.
+        LOGGER.warning(
+            "Answering 503 for %s, rasenmaeher unavailable (%s) [transaction=%s]",
+            _safe(callsign),
+            exc,
+            transaction,
+        )
+        return Response(content=b"rasenmaeher unavailable", status_code=503, media_type="text/plain")
 
     LOGGER.info("Issued a certificate to %s [transaction=%s]", _safe(callsign), transaction)
     return Response(content=cert_rep(ra, parsed, issued.certificate), media_type=PKI_MESSAGE)

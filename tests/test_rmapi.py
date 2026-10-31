@@ -4,6 +4,7 @@ One call, and what matters is that each answer is turned into the right thing to
 A refusal is final; an outage is worth retrying.
 """
 
+import json
 from pathlib import Path
 
 import httpx
@@ -56,21 +57,26 @@ async def test_success(monkeypatch: pytest.MonkeyPatch) -> None:
         seen["url"] = str(request.url)
         seen["request-id"] = request.headers.get("X-Request-ID")
         seen["forwarded"] = request.headers.get("X-Forwarded-For")
+        seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={"success": True, "certificate": CERT})
 
     client = _client(handler, monkeypatch)
-    issued = await client.complete_enrollment("OTTER1", "csr", request_id="abc", forwarded_for="10.0.0.1")
+    issued = await client.complete_enrollment(
+        "OTTER1", "csr", challenge="from-the-device", request_id="abc", forwarded_for="10.0.0.1"
+    )
     assert issued == IssuedCertificate(callsign="OTTER1", certificate=CERT)
     assert seen["url"] == "https://rasenmaeher.test/api/v1/enrollment/accept"
     # Passed through so the audit line joins ours and shows the MDM, not this container
     assert seen["request-id"] == "abc"
     assert seen["forwarded"] == "10.0.0.1"
+    # RASENMAEHER owns the challenge, so the device's goes along unchecked
+    assert seen["body"] == {"callsign": "OTTER1", "csr": "csr", "challenge": "from-the-device"}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 401, 403, 409])
 async def test_refusals_are_final(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
-    """Not planned, already taken, not ours to complete: the device gains nothing by asking again"""
+    """Closed, already taken, not ours to enrol: the device gains nothing by asking again"""
     client = _client(lambda request: httpx.Response(status, json={"detail": "no"}), monkeypatch)
     with pytest.raises(RmapiRefused):
         await client.complete_enrollment("OTTER1", "csr")
@@ -109,4 +115,67 @@ async def test_answer_that_is_not_json(monkeypatch: pytest.MonkeyPatch) -> None:
     """Something is in front of RASENMAEHER that should not be"""
     client = _client(lambda request: httpx.Response(200, text="<html>hello</html>"), monkeypatch)
     with pytest.raises(RmapiUnavailable):
+        await client.complete_enrollment("OTTER1", "csr")
+
+
+def _captured_verify(monkeypatch: pytest.MonkeyPatch) -> object:
+    """What the client would hand httpx as its trust store"""
+    seen: dict[str, object] = {}
+
+    class _Recorder:
+        def __init__(self, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Recorder)
+    Client(base_url="https://rasenmaeher.test")._client()
+    return seen["verify"]
+
+
+def test_rmapi_tls_uses_the_system_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The deployment CA is what devices trust, not what RASENMAEHER is served with
+
+    In compose we reach it through the public mTLS host, whose certificate is publicly issued.
+    Pinning to the deployment CA chain here refused every connection, so nothing could enrol.
+    """
+    ca_chain = tmp_path / "ca_chain.pem"
+    ca_chain.write_text("-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setattr(config, "CA_CHAIN_PATH", ca_chain)
+    monkeypatch.setattr(config, "RMAPI_CA", None)
+    assert _captured_verify(monkeypatch) is True, "the CA chain must not become the trust store"
+
+
+def test_rmapi_ca_overrides_when_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """For a deployment that reaches RASENMAEHER on a name the system store does not know"""
+    own_ca = tmp_path / "rmapi_ca.pem"
+    own_ca.write_text("-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setattr(config, "RMAPI_CA", own_ca)
+    assert _captured_verify(monkeypatch) == str(own_ca)
+
+
+def test_rmapi_ca_that_does_not_exist_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A misconfigured path must not silently disable verification"""
+    monkeypatch.setattr(config, "RMAPI_CA", Path("/nonexistent/ca.pem"))
+    assert _captured_verify(monkeypatch) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 307])
+async def test_a_redirect_is_an_outage_not_a_verdict(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """The mTLS location answers a failed client-certificate check with a 302 to an error page
+
+    That is exactly what a freshly issued certificate gets while the OCSP responder has not heard
+    of it yet. Treating it as a refusal hands the device a final answer and spends its callsign
+    over a few minutes of warm-up, which is the failure the 503 handling exists to prevent.
+    """
+    client = _client(lambda request: httpx.Response(status, headers={"location": "/error?code=mtls_fail"}), monkeypatch)
+    with pytest.raises(RmapiUnavailable):
+        await client.complete_enrollment("OTTER1", "csr")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 409])
+async def test_rasenmaeher_own_refusals_stay_final(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """Closed, not ours, already taken: these are verdicts and must not become retries"""
+    client = _client(lambda request: httpx.Response(status, json={"detail": "no"}), monkeypatch)
+    with pytest.raises(RmapiRefused):
         await client.complete_enrollment("OTTER1", "csr")

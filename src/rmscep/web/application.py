@@ -28,8 +28,6 @@ async def app_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     app.state.ra_identity = RaIdentity.load_or_create(config.ra_dir())
     LOGGER.info("RA identity ready, serial %s", app.state.ra_identity.cert.serial_number)
-    if not config.CHALLENGE:
-        LOGGER.error("RMSCEP_CHALLENGE is not set, every enrolment will be refused")
     if not config.RMAPI_URL:
         LOGGER.error("RMSCEP_RMAPI_URL is not set, every enrolment will be refused")
     yield None

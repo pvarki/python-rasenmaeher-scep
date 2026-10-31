@@ -9,6 +9,13 @@ certificate profile at this service. The device enrols over SCEP and comes out o
 enrolment with a certificate from the RASENMAEHER deployment CA, so a device can join a
 deployment without installing any application of ours on the phone.
 
+How it works
+------------
+
+``docs/mdm-enrolment.rst`` describes the whole path: what authorises an enrolment, what the MDM
+must put in the certificate subject, the order operations have to happen in, and what is not done
+yet.
+
 Talking to rmapi
 ----------------
 
@@ -26,7 +33,9 @@ All configuration is via environment variables:
     Base URL of the RASENMAEHER API to call.
 
 ``RMSCEP_CHALLENGE``
-    SCEP challenge password the enrolling client must present.
+    Only for ``mdm-apply`` and ``selftest``: the challenge shown on the admin UI's MDM page. The
+    responder passes each device's challenge on to RASENMAEHER, which checks it and decides
+    whether an admin has opened enrolment.
 
 ``RMSCEP_CERT``
     Path to this service's own client certificate (issued by the deployment CA).
