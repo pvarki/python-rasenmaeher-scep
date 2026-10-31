@@ -224,6 +224,11 @@ def _days_left(certfile: Path) -> int | None:
 @click.option("--template", default=None, help="The document saying what to install (default: RMSCEP_MDM_TEMPLATE)")
 @click.option("--mdm-url", default=None, help="Base URL of the MDM API (default: RMSCEP_MDM_URL)")
 @click.option("--team", default=None, help="The group devices join (default: RMSCEP_MDM_TEAM)")
+@click.option(
+    "--prep-team",
+    default=None,
+    help="Also set up this group, where devices enrol and are named before they move to --team",
+)
 @click.option("--domain", default=None, help="The deployment's DNS name (default: RMSCEP_DOMAIN)")
 @click.option(
     "--force-policy", is_flag=True, help="Re-upload the policy even if unchanged, to reach a host that just joined"
@@ -246,6 +251,7 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     template: str | None,
     mdm_url: str | None,
     team: str | None,
+    prep_team: str | None,
     domain: str | None,
     force_policy: bool,
     force_certificate: bool,
@@ -313,7 +319,8 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     token = config.MDM_TOKEN_FILE.read_text(encoding="utf-8").strip()
 
     try:
-        result = FleetMdm(url, token).apply(
+        fleet = FleetMdm(url, token)
+        result = fleet.apply(
             team or config.MDM_TEAM,
             wanted,
             force_policy=force_policy,
@@ -323,11 +330,15 @@ def mdm_apply(  # pylint: disable=too-many-arguments,too-many-positional-argumen
             scep_url=f"https://{the_domain}/scep",
             challenge=config.CHALLENGE,
         )
+        if prep_team:
+            prep = fleet.apply_preparation(prep_team, wanted, result["link"], force_policy=force_policy)
     except FleetError as exc:
         click.echo(f"The MDM refused: {exc}", err=True)
         ctx.exit(1)
         return
     click.echo(f"Applied to team {result['team_id']}: {len(result['assigned'])} apps assigned")
+    if prep_team:
+        click.echo(f"Applied to preparation team {prep['team_id']}: the same apps and launcher, no certificate")
     ctx.exit(0)
 
 

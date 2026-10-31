@@ -4,6 +4,7 @@ Every request shape and every wait in here was measured against a live Fleet, an
 say which. None of it mentions a product: what to install arrives in the template.
 """
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -403,6 +404,7 @@ class FleetMdm:
         force_certificate: bool = False,
         scep_url: str = "",
         challenge: str = "",
+        link_package: str = "",
     ) -> dict[str, Any]:
         """State everything the template says, in the order that actually works
 
@@ -414,6 +416,8 @@ class FleetMdm:
         Given scep_url, the certificate authority is created too, so a fresh deployment needs
         nothing typed into Fleet by hand. Without it the authority must already be there, which
         is the case for an MDM we cannot create one in.
+
+        Given link_package, that launcher is assigned instead of looking one up or publishing one.
         """
         team = self.team_id(team_name)
         if template.certificate:
@@ -431,7 +435,7 @@ class FleetMdm:
         packages = [app.package for app in template.apps]
         preinstall = list(template.preinstall_packages)
         if template.link_app:
-            link = self.ensure_link_app(team, template.link_app.title, template.link_app.url)
+            link = link_package or self.ensure_link_app(team, template.link_app.title, template.link_app.url)
             packages.append(link)
             preinstall.append(link)
 
@@ -450,4 +454,26 @@ class FleetMdm:
         for app in template.apps:
             if app.config:
                 self.set_app_config(team, app.package, app.config)
-        return {"team_id": team, "assigned": sorted(assigned), "preinstall": sorted(preinstall)}
+        return {
+            "team_id": team,
+            "assigned": sorted(assigned),
+            "preinstall": sorted(preinstall),
+            "link": link if template.link_app else "",
+        }
+
+    def apply_preparation(
+        self, team_name: str, template: MdmTemplate, link_package: str, force_policy: bool = False
+    ) -> dict[str, Any]:
+        """The team devices enrol into and get named in, before they move to the certificate team
+
+        Everything but the certificate, so nothing is asked for before the device has its name.
+        The launcher has to be the very package the certificate team holds: apps install only at
+        enrolment, so a device moving to a team with another launcher package has it uninstalled
+        and never gets the other one.
+        """
+        return self.apply(
+            team_name,
+            dataclasses.replace(template, certificate=None),
+            force_policy=force_policy,
+            link_package=link_package,
+        )

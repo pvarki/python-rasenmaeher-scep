@@ -97,7 +97,7 @@ class _Fleet:
             self.certificates = [c for c in self.certificates if c["id"] != gone]
             return httpx.Response(200, json={})
         if path == "/api/latest/fleet/teams" and request.method == "GET":
-            return httpx.Response(200, json={"teams": [{"id": 7, "name": "rmscep"}]})
+            return httpx.Response(200, json={"teams": [{"id": 7, "name": "rmscep"}, {"id": 8, "name": "prep"}]})
         if path.endswith("/software/titles"):
             # Fleet scopes the listing to one team. A stub that ignored team_id would let a
             # lookup find another team's app and call that a pass.
@@ -423,6 +423,30 @@ def test_applying_twice_publishes_one_web_app(monkeypatch: pytest.MonkeyPatch) -
     assert len(fleet.web_apps) == 1, f"the re-run must not publish again, got {[a['title'] for a in fleet.web_apps]}"
     launchers = [t for t in fleet.titles if t["display_name"].startswith("Deploy App")]
     assert len(launchers) == 1, "the team must end up with one launcher, not one per run"
+
+
+def test_the_preparation_team_holds_the_same_launcher_and_no_certificate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A device moving from the preparation team keeps the apps it enrolled with, and only those
+
+    So the launcher has to be the same package in both teams. One of its own is another package,
+    which the move uninstalls and nothing installs again: the phone loses its Deploy App icon.
+    """
+    fleet = _Fleet()
+    template = MdmTemplate(
+        apps=TEMPLATE.apps,
+        policy=TEMPLATE.policy,
+        link_app=LinkApp(title="Deploy App", url="https://same.test/"),
+        certificate=Certificate(name="rmscep", subject="CN=$VAR", authority="RMSCEP"),
+    )
+    mdm = _mdm(fleet, monkeypatch)
+    main = mdm.apply("rmscep", template)
+    fleet.calls.clear()
+    prep = mdm.apply_preparation("prep", template, main["link"])
+
+    assert len(fleet.web_apps) == 1, "the preparation team must not publish a launcher of its own"
+    assert main["link"] in prep["assigned"]
+    assert prep["assigned"] == main["assigned"]
+    assert not [p for _, p in fleet.calls if p.endswith("/certificates")], "nothing is asked for before the name"
 
 
 def test_a_wiped_team_says_what_is_wrong_instead_of_just_409(monkeypatch: pytest.MonkeyPatch) -> None:
