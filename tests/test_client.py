@@ -132,6 +132,31 @@ def test_the_ra_is_picked_by_what_it_is_for_not_by_position(responder: TestClien
     assert "rmscep" in client.pick_ra(certificates).subject.rfc4514_string()
 
 
+def test_a_ca_allowing_key_encipherment_is_not_the_ra() -> None:
+    """cert-manager CAs carry keyEncipherment, and DER may sort them ahead of the RA"""
+
+    def issued(name: str, ca: bool) -> x509.Certificate:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+        now = datetime.datetime.now(datetime.UTC)
+        usage = x509.KeyUsage(True, False, True, False, False, ca, False, False, False)
+        return (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+            .add_extension(usage, critical=True)
+            .sign(key, hashes.SHA256())
+        )
+
+    root, ra = issued("Root CA", ca=True), issued("rmscep SCEP RA", ca=False)
+    assert client.pick_ra([root, ra]) is ra
+
+
 def test_picking_the_ra_falls_back_rather_than_failing(responder: TestClient) -> None:
     """A responder publishing no key usage at all should still be talkable to"""
     _ = responder

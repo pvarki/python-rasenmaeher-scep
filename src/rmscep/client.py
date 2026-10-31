@@ -78,9 +78,15 @@ def pick_ra(certificates: list[x509.Certificate]) -> x509.Certificate:
     Not the first one. PKCS#7 carries them in a SET OF, and DER sorts a SET OF, so the order is
     whatever the encoding happened to produce -- pick by what the certificate is for instead. A
     client that guesses encrypts to the CA, and the responder then cannot decrypt, which surfaces
-    as a malformed request and reads nothing like a trust problem.
+    as a malformed request and reads nothing like a trust problem. Some CAs allow their own key
+    encipherment too, so a CA is never the RA.
     """
     for certificate in certificates:
+        try:
+            if certificate.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+                continue
+        except x509.ExtensionNotFound:
+            pass
         try:
             usage = certificate.extensions.get_extension_for_class(x509.KeyUsage).value
         except x509.ExtensionNotFound:
